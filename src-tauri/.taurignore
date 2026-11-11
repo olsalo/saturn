@@ -1,0 +1,4 @@
+# Generated files must not restart `tauri dev` while its build script writes them.
+/binaries/
+/gen/
+/target/

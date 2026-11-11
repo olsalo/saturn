@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Saturn</title>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#fff"/>
+  <g transform="translate(176 176) scale(28)" color="#262626" fill="currentColor">
+<defs>
+    <mask id="ring-gap" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+      <path fill="white" d="M0 0h24v24H0z"/>
+      <path fill="black" stroke="black" stroke-width="2" d="M0 16h4v-2h4v-2h4v-2h4V8h4V6h4v2h-4v2h-4v2h-4v2H8v2H4v2H0z"/>
+    </mask>
+  </defs>
+  <path d="M8 4h8v2h2v2h2v8h-2v2h-2v2H8v-2H6v-2H4V8h2V6h2z" mask="url(#ring-gap)"/>
+  <path d="M0 16h4v-2h4v-2h4v-2h4V8h4V6h4v2h-4v2h-4v2h-4v2H8v2H4v2H0z"/>
+  </g>
+</svg>

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Saturn records the window you select and saves it to your recording project.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Saturn records microphone audio only when you enable the microphone.</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Saturn Recording</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleTypeIconFile</key>
+			<string>icon.icns</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.saturn.recorder.project</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.saturn.recorder.project</string>
+			<key>UTTypeDescription</key>
+			<string>Saturn Recording</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.archive</string>
+			</array>
+			<key>UTTypeIconFile</key>
+			<string>icon.icns</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>saturn</string>
+					<string>recproj</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>

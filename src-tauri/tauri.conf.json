@@ -1,0 +1,72 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Saturn",
+  "version": "0.1.0",
+  "identifier": "com.saturn.recorder",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run setup:encoder && npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Saturn",
+        "width": 420,
+        "height": 800,
+        "minWidth": 400,
+        "minHeight": 400,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "center": true,
+        "contentProtected": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "externalBin": [
+      "binaries/recorder-native",
+      "binaries/HandBrakeCLI",
+      "binaries/ffmpeg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "15.0",
+      "infoPlist": "Info.plist",
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist"
+    },
+    "fileAssociations": [
+      {
+        "ext": ["saturn", "recproj"],
+        "name": "Saturn Recording",
+        "role": "Editor",
+        "rank": "Owner",
+        "exportedType": {
+          "identifier": "com.saturn.recorder.project",
+          "conformsTo": ["public.data", "public.archive"]
+        }
+      }
+    ]
+  }
+}

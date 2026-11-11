@@ -1,0 +1,19 @@
+# Dependencies and build output
+node_modules/
+/dist/
+/src-tauri/target/
+*.tsbuildinfo
+/src-tauri/gen/
+
+# Native helpers and downloaded encoder artifacts (regenerated during setup)
+/src-tauri/binaries/recorder-native-*
+/src-tauri/binaries/HandBrakeCLI-*
+/src-tauri/binaries/ffmpeg-*
+/public/legal/ffmpeg/ffmpeg-*.tar.xz
+
+# Local previews, exports, and scratch files
+/.playwright-mcp/
+/output/
+/junk/
+.DS_Store
+*.log
