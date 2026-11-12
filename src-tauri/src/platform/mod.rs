@@ -38,6 +38,7 @@ pub fn call(command: &str, args: &[&str]) -> Result<serde_json::Value, String> {
         "open-screen-settings",
         "request-microphone-permission",
         "open-microphone-settings",
+        "open-file-settings",
     ]
     .contains(&command)
     {

@@ -1,0 +1,9 @@
+Unmodified opus 1.6.1.
+Source: https://ftp.osuosl.org/pub/xiph/releases/opus/opus-1.6.1.tar.gz
+SHA-256: 6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+Complete source is included alongside this file. Build with Apple command-line tools; Opus also requires CMake.
+Configure options used: -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_PREFIX=/Users/olli/Desktop/saturn/src-tauri/target/encoder-tools/opus-1.6.1-arm64 -DOPUS_BUILD_TESTING=OFF -DOPUS_BUILD_PROGRAMS=OFF -DOPUS_INSTALL_PKG_CONFIG_MODULE=ON
+cmake -S . -B build [options above]
+cmake --build build --parallel 8
+cmake --install build
+The installation prefix can be changed to a local staging directory. Link the resulting static library into FFmpeg using its pkg-config file.

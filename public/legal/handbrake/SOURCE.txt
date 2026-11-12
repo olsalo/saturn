@@ -1,5 +1,0 @@
-HandBrakeCLI 1.11.2, a separate encoder distributed with Saturn.
-Official source release: https://github.com/HandBrake/HandBrake/releases/tag/1.11.2
-Source tree: https://github.com/HandBrake/HandBrake/tree/1.11.2
-Executable origin: https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrakeCLI-1.11.2.dmg
-The supplied LICENSE, COPYING and AUTHORS.markdown apply to HandBrake and its components.

@@ -102,12 +102,13 @@ pub fn start(app: &tauri::AppHandle, options: RecordingOptions) -> Result<()> {
                     Some(serde_json::from_value(audio.clone()).map_err(|e| e.to_string())?);
             }
             defaults.apply(&mut m, &work)?;
-            let p = Project {
+            let mut p = Project {
                 work: work.clone(),
                 path,
                 manifest: m,
             };
-            p.save()?;
+            let save_state = handle.state::<Shared>();
+            save_recording_with_folder_retry(&mut p, &save_state)?;
             let _ = fs::remove_file(work.join("dirty"));
             Ok(p)
         });
@@ -145,7 +146,7 @@ pub fn start(app: &tauri::AppHandle, options: RecordingOptions) -> Result<()> {
 }
 
 fn recovery_error_message(error: &str) -> String {
-    if error.contains("Operation not permitted (os error 1)") {
+    if recovery_permission_failure(error) {
         "Saturn couldn’t finish the recording because macOS denied access. Your captured files were kept for recovery.".into()
     } else {
         format!("Saturn couldn’t finish the recording. Your captured files were kept for recovery. Details: {error}")

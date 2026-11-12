@@ -170,7 +170,7 @@ button:not(:disabled) {
   animation: pulse 1.6s infinite;
 }
 .capture-intro {
-  text-align: center;
+  text-align: left;
   margin-bottom: 23px;
 }
 .eyebrow {
@@ -254,6 +254,9 @@ button:not(:disabled) {
   gap: 7px;
   font-size: 14px;
   cursor: pointer;
+}
+.audio-options label:has([data-slot="switch"][data-disabled]) {
+  cursor: default;
 }
 .audio-options label svg {
   width: 14px;
@@ -652,7 +655,7 @@ button:not(:disabled) {
   font-size: 12px;
 }
 .help-popover {
-  width: 360px;
+  width: 100vw;
   max-width: var(--available-width);
   font-size: 15px;
 }
@@ -664,6 +667,7 @@ button:not(:disabled) {
   font-weight: 550;
 }
 .help-popover p {
+  margin: 12px 0;
   line-height: 1.8;
   color: var(--muted-foreground);
 }
@@ -1263,6 +1267,31 @@ html[data-desktop] {
   opacity: 1;
 }
 
+.website-export-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 18px 0;
+}
+.website-export-setting label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  cursor: pointer;
+}
+.website-export-setting:has([data-slot="switch"][data-disabled]) label {
+  cursor: default;
+}
+.website-export-setting strong {
+  font-size: 15px;
+  font-weight: 550;
+}
+.website-export-setting span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
 .export-audio-settings > strong {
   font-size: 15px;
   font-weight: 550;
@@ -1270,8 +1299,20 @@ html[data-desktop] {
 .export-audio-settings .audio-options {
   margin: 10px 0 18px;
 }
+.export-audio-settings label[data-unavailable] {
+  opacity: 0.64;
+  cursor: default;
+}
+.export-audio-settings label[data-unavailable] [data-slot="switch"] {
+  opacity: 1;
+}
+.exporting .export-audio-settings > strong,
+.exporting .export-audio-settings label:not([data-unavailable]) > span {
+  opacity: 0.64;
+}
 /* Pending saves must not dim or flash controls and labels. */
-.settings-saving .audio-options [data-slot="switch"][data-disabled],
+.settings-saving .export-audio-settings [data-slot="switch"][data-available="true"][data-disabled],
+.settings-saving .website-export-setting [data-slot="switch"][data-disabled],
 .settings-saving input:disabled,
 .settings-saving textarea:disabled {
   opacity: 1;
@@ -1306,6 +1347,9 @@ html[data-desktop] {
   white-space: pre-wrap;
 }
 
+.footer-alerts > [data-slot="alert"] {
+  background: white;
+}
 .footer-alerts {
   display: flex;
   flex-direction: column;

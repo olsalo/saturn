@@ -1,11 +1,12 @@
 fn main() {
     println!("cargo:rerun-if-changed=native/RecorderNative.swift");
+    println!("cargo:rerun-if-changed=native/ExportCompositor.swift");
     println!("cargo:rerun-if-changed=native/RecordingShortcut.swift");
     println!("cargo:rerun-if-changed=native/CaptureGeometry.swift");
     println!("cargo:rerun-if-changed=native/CursorTimeline.swift");
     println!("cargo:rerun-if-changed=native/CursorAppearance.swift");
     println!("cargo:rerun-if-changed=native/VideoTiming.swift");
-    println!("cargo:rerun-if-changed=native/HandBrakeEncoder.swift");
+    println!("cargo:rerun-if-changed=native/ExportEncoder.swift");
     println!("cargo:rerun-if-changed=native/FFmpegEncoder.swift");
     println!("cargo:rerun-if-changed=native/CapturePermission.swift");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
@@ -29,9 +30,10 @@ fn main() {
                 "-target",
                 &swift_target,
                 "native/RecorderNative.swift",
+                "native/ExportCompositor.swift",
                 "native/RecordingShortcut.swift",
                 "native/VideoTiming.swift",
-                "native/HandBrakeEncoder.swift",
+                "native/ExportEncoder.swift",
                 "native/FFmpegEncoder.swift",
                 "native/CaptureGeometry.swift",
                 "native/CursorTimeline.swift",
@@ -68,9 +70,10 @@ fn main() {
         let modified = std::fs::metadata(&binary).and_then(|m| m.modified()).ok();
         let stale = [
             "native/RecorderNative.swift",
+            "native/ExportCompositor.swift",
             "native/RecordingShortcut.swift",
             "native/VideoTiming.swift",
-            "native/HandBrakeEncoder.swift",
+            "native/ExportEncoder.swift",
             "native/FFmpegEncoder.swift",
             "native/CaptureGeometry.swift",
             "native/CursorTimeline.swift",
@@ -99,9 +102,10 @@ fn main() {
                     "-target",
                     &format!("{}-apple-macosx15.0", target.split('-').next().unwrap()),
                     "native/RecorderNative.swift",
+                    "native/ExportCompositor.swift",
                     "native/RecordingShortcut.swift",
                     "native/VideoTiming.swift",
-                    "native/HandBrakeEncoder.swift",
+                    "native/ExportEncoder.swift",
                     "native/FFmpegEncoder.swift",
                     "native/CaptureGeometry.swift",
                     "native/CursorTimeline.swift",

@@ -33,8 +33,6 @@ struct CaptureDefaults {
     aspect_ratio: Option<String>,
     resolution: Option<String>,
     background: Option<(project::manifest::Background, Option<Vec<u8>>)>,
-    include_system_audio: Option<bool>,
-    include_microphone_audio: Option<bool>,
 }
 impl CaptureDefaults {
     fn window() -> Self {
@@ -42,8 +40,6 @@ impl CaptureDefaults {
             aspect_ratio: Some("16:10".into()),
             resolution: Some("high".into()),
             background: None,
-            include_system_audio: Some(true),
-            include_microphone_audio: Some(true),
         }
     }
     fn display() -> Self {
@@ -51,8 +47,6 @@ impl CaptureDefaults {
             aspect_ratio: Some("original".into()),
             resolution: Some("original".into()),
             background: None,
-            include_system_audio: Some(true),
-            include_microphone_audio: Some(true),
         }
     }
     fn apply(self, manifest: &mut project::manifest::Manifest, work: &Path) -> Result<()> {
@@ -61,12 +55,6 @@ impl CaptureDefaults {
         }
         if let Some(resolution) = self.resolution {
             manifest.export_settings.resolution = Some(resolution);
-        }
-        if let Some(enabled) = self.include_system_audio {
-            manifest.export_settings.include_system_audio = enabled;
-        }
-        if let Some(enabled) = self.include_microphone_audio {
-            manifest.export_settings.include_microphone_audio = enabled;
         }
         if let Some((background, bytes)) = self.background {
             if let project::manifest::Background::EmbeddedImage { path, .. } = &background {
@@ -144,6 +132,7 @@ struct Snapshot {
     error: Option<String>,
     progress: f64,
     output_path: Option<String>,
+    output_is_website: bool,
     job_id: Option<String>,
     pending_count: usize,
     recoveries: Vec<String>,
@@ -240,6 +229,7 @@ fn snapshot(s: &Session) -> Snapshot {
         error: s.error.clone(),
         progress: s.progress,
         output_path: s.output.as_ref().map(|p| p.to_string_lossy().into()),
+        output_is_website: s.output.as_ref().is_some_and(|p| p.is_dir()),
         job_id: s.job.clone(),
         pending_count: s.pending.len(),
         recoveries: s
@@ -290,28 +280,62 @@ fn workspace(state: &Shared) -> Result<PathBuf> {
     }
     Ok(work)
 }
-fn recordings_folder(state: &Shared) -> Result<PathBuf> {
-    let pref = state.root.join("preferences.json");
-    if let Ok(data) = fs::read(&pref) {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) {
-            if let Some(p) = v["recordingsFolder"].as_str() {
-                let folder = PathBuf::from(p);
-                if folder.is_dir() {
-                    return Ok(folder);
-                }
-            }
-        }
-    }
+fn check_folder_access(folder: &Path) -> std::io::Result<()> {
+    // A successful metadata check does not imply macOS will permit file creation.
+    let probe = folder.join(format!(".saturn-access-{}", uuid::Uuid::new_v4()));
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(&probe)?;
+    drop(file);
+    fs::remove_file(probe)
+}
+fn choose_recordings_folder(state: &Shared) -> Result<PathBuf> {
     let folder = rfd::FileDialog::new()
-        .set_title("Choose your Recordings folder")
+        .set_title("Choose a folder to allow Saturn to save recordings")
         .pick_folder()
-        .ok_or("Recording cancelled: choose a folder to save your projects")?;
+        .ok_or("No folder selected. Choose a folder to allow Saturn to save recordings.")?;
+    check_folder_access(&folder).map_err(|e| format!(
+        "Saturn cannot write to the selected folder: {e}. Choose a different folder or allow access in System Settings."
+    ))?;
+    let pref = state.root.join("preferences.json");
     fs::write(
         pref,
         serde_json::to_vec(&serde_json::json!({"recordingsFolder":folder})).unwrap(),
     )
     .map_err(|e| e.to_string())?;
     Ok(folder)
+}
+fn recordings_folder(state: &Shared) -> Result<PathBuf> {
+    let pref = state.root.join("preferences.json");
+    if let Ok(data) = fs::read(&pref) {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) {
+            if let Some(p) = v["recordingsFolder"].as_str() {
+                let folder = PathBuf::from(p);
+                if check_folder_access(&folder).is_ok() {
+                    return Ok(folder);
+                }
+            }
+        }
+    }
+    choose_recordings_folder(state)
+}
+fn permission_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(libc::EPERM)
+}
+const FILE_ACCESS_REQUIRED: &str = "SATURN_FILE_ACCESS_REQUIRED";
+fn recovery_permission_failure(error: &str) -> bool {
+    error.contains("os error 1)") || error.contains("os error 13)") || error.contains(FILE_ACCESS_REQUIRED)
+}
+fn save_recording_with_folder_retry(project: &mut Project, _state: &Shared) -> Result<()> {
+    let parent = project.path.parent().ok_or("Invalid save folder")?;
+    if let Err(error) = check_folder_access(parent) {
+        return if permission_error(&error) {
+            Err(FILE_ACCESS_REQUIRED.into())
+        } else {
+            Err(format!("Cannot access the recordings folder: {error}"))
+        };
+    }
+    project.save().map_err(|error| {
+        if recovery_permission_failure(&error) { FILE_ACCESS_REQUIRED.into() } else { error }
+    })
 }
 fn unique_path(parent: &Path, name: &str, ext: &str) -> PathBuf {
     let mut path = parent.join(format!("{name}.{ext}"));
@@ -397,6 +421,10 @@ async fn open_screen_recording_settings() -> Result<()> {
     blocking(|| platform::call("open-screen-settings", &[]).map(|_| ())).await
 }
 #[tauri::command]
+async fn open_file_access_settings() -> Result<()> {
+    blocking(|| platform::call("open-file-settings", &[]).map(|_| ())).await
+}
+#[tauri::command]
 async fn request_microphone_permission() -> Result<serde_json::Value> {
     blocking(|| platform::call("request-microphone-permission", &[])).await
 }
@@ -408,6 +436,18 @@ fn has_recoverable_data(work: &Path) -> bool {
     work.join("manifest.json").is_file()
         || fs::metadata(work.join("media/source.mov")).is_ok_and(|m| m.is_file() && m.len() > 0)
         || fs::metadata(work.join("media/source.mp4")).is_ok_and(|m| m.is_file() && m.len() > 0)
+}
+fn is_recovery_candidate(work: &Path) -> bool {
+    has_recoverable_data(work)
+        && (work.join("dirty").exists()
+            || (!work.join("manifest.json").exists() && work.join("media/source.mov").exists()))
+}
+fn mark_recovery_complete(work: &Path) -> Result<()> {
+    match fs::remove_file(work.join("dirty")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("The project was saved, but Saturn could not mark recovery complete: {error}")),
+    }
 }
 #[tauri::command]
 async fn start_recording(
@@ -557,13 +597,9 @@ async fn update_export_audio(app: tauri::AppHandle, system: bool, microphone: bo
         if p.manifest.media.separate_audio.is_none() {
             return Err("This recording does not have separate audio tracks".into());
         }
-        let kind = p.manifest.media.capture_kind.clone();
         p.manifest.export_settings.include_system_audio = system;
         p.manifest.export_settings.include_microphone_audio = microphone;
         save_current(&app, &mut s)?;
-        let defaults = s.defaults_mut(&kind);
-        defaults.include_system_audio = Some(system);
-        defaults.include_microphone_audio = Some(microphone);
         Ok(())
     })
     .await
@@ -686,8 +722,19 @@ async fn choose_background(app: tauri::AppHandle) -> Result<()> {
     .await
 }
 #[tauri::command]
-async fn start_export(app: tauri::AppHandle, choose_destination: Option<bool>) -> Result<()> {
-    blocking(move || export::start(&app, choose_destination.unwrap_or(false))).await
+async fn start_export(
+    app: tauri::AppHandle,
+    choose_destination: Option<bool>,
+    export_format: Option<String>,
+) -> Result<()> {
+    blocking(move || {
+        export::start(
+            &app,
+            choose_destination.unwrap_or(false),
+            export_format.as_deref().unwrap_or("web"),
+        )
+    })
+    .await
 }
 #[tauri::command]
 fn cancel_export(app: tauri::AppHandle, job_id: String) -> Result<()> {
@@ -717,7 +764,7 @@ async fn file_action(app: tauri::AppHandle, action: String, exported: bool) -> R
             s.project.as_ref().map(|p| &p.path)
         }
         .ok_or("No file available yet")?;
-        if !path.is_file() {
+        if !path.is_file() && !(exported && path.is_dir()) {
             return Err("The file moved or was removed. Use Save As to save another copy.".into());
         }
         if !["reveal", "copy-file", "copy-path"].contains(&action.as_str()) {
@@ -758,7 +805,7 @@ fn new_recording(app: tauri::AppHandle) -> Result<()> {
     Ok(())
 }
 #[tauri::command]
-async fn recover_recording(app: tauri::AppHandle, id: String) -> Result<()> {
+async fn recover_recording(app: tauri::AppHandle, id: String, choose_folder: bool) -> Result<()> {
     blocking(move || {
         let state = app.state::<Shared>();
         let mut s = lock(&state)?;
@@ -770,6 +817,7 @@ async fn recover_recording(app: tauri::AppHandle, id: String) -> Result<()> {
             .cloned()
             .ok_or("Recovery no longer available")?;
         let outcome = (|| -> Result<()> {
+            let selected_folder = if choose_folder { Some(choose_recordings_folder(&state)?) } else { None };
             let info = fs::read(work.join("recovery.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
@@ -807,32 +855,38 @@ async fn recover_recording(app: tauri::AppHandle, id: String) -> Result<()> {
                 }
             }
             manifest.use_export_layout();
-            let path = info
+            let original_path = info
                 .and_then(|v| v["destination"].as_str().map(PathBuf::from))
-                .filter(|p| p.parent().is_some_and(Path::is_dir))
-                .unwrap_or(unique_path(
-                    &recordings_folder(&state)?,
-                    "Recovered recording",
-                    "saturn",
-                ));
-            let p = Project {
+                .filter(|p| p.parent().is_some_and(Path::is_dir));
+            let path = if let Some(folder) = selected_folder.as_deref() {
+                unique_path(folder, "Recovered recording", "saturn")
+            } else {
+                match original_path {
+                    Some(path) if !path.exists() => path,
+                    Some(path) => unique_path(path.parent().unwrap(), "Recovered recording", "saturn"),
+                    None => return Err(FILE_ACCESS_REQUIRED.into()),
+                }
+            };
+            let mut p = Project {
                 work: work.clone(),
                 path,
                 manifest,
             };
-            p.save()?;
-            let _ = fs::remove_file(work.join("dirty"));
+            save_recording_with_folder_retry(&mut p, &state)?;
+            mark_recovery_complete(&work)?;
             scoped(&app, &p);
             retire(s.project.replace(p));
             s.mode = "export_ready".into();
             s.error = None;
             Ok(())
-        })();
-        if outcome.is_err() {
-            // Keep the captured files, but do not offer the same failed recovery again.
-            fs::write(work.join("recovery-failed"), b"").map_err(|e| e.to_string())?;
+        })().map_err(|error| if recovery_permission_failure(&error) { FILE_ACCESS_REQUIRED.into() } else { error });
+        if outcome.is_ok() {
+            s.recoveries.retain(|p| p != &work);
+            let _ = fs::remove_file(work.join("recovery-failed"));
+            if s.error.as_deref().is_some_and(|error| error.starts_with("Saturn couldn’t finish the recording")) {
+                s.error = None;
+            }
         }
-        s.recoveries.retain(|p| p != &work);
         notify(&app, &s);
         outcome
     })
@@ -854,6 +908,9 @@ fn discard_recovery(app: tauri::AppHandle, id: String) -> Result<()> {
         .ok_or("Recovery no longer available")?;
     fs::remove_dir_all(&work).map_err(|e| e.to_string())?;
     s.recoveries.retain(|p| p != &work);
+    if s.error.as_deref().is_some_and(|error| error.starts_with("Saturn couldn’t finish the recording")) {
+        s.error = None;
+    }
     notify(&app, &s);
     Ok(())
 }
@@ -883,13 +940,7 @@ pub fn run() {
             }
             let recoveries = fs::read_dir(root.join("sessions"))?
                 .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| {
-                    !p.join("recovery-failed").exists()
-                        && has_recoverable_data(p)
-                        && (p.join("dirty").exists()
-                            || (!p.join("manifest.json").exists()
-                                && p.join("media/source.mov").exists()))
-                })
+                .filter(|p| is_recovery_candidate(p))
                 .collect();
             app.manage(Shared {
                 inner: Mutex::new(Session {
@@ -914,6 +965,7 @@ pub fn run() {
             request_capture_permission,
             open_screen_recording_settings,
             request_microphone_permission,
+            open_file_access_settings,
             open_microphone_settings,
             start_recording,
             stop_recording,
@@ -997,6 +1049,25 @@ pub fn run() {
 mod session_defaults_tests {
     use super::*;
     #[test]
+    fn recovery_identifies_file_permission_errors() {
+        assert!(recovery_permission_failure("Operation not permitted (os error 1)"));
+        assert!(recovery_permission_failure("Permission denied (os error 13)"));
+        assert!(recovery_permission_failure(FILE_ACCESS_REQUIRED));
+        assert!(!recovery_permission_failure("No recoverable video track"));
+    }
+    #[test]
+    fn folder_access_checks_actual_file_creation() {
+        let folder = std::env::temp_dir().join(format!("saturn-access-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&folder).unwrap();
+        check_folder_access(&folder).unwrap();
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+        assert!(check_folder_access(&folder.join("missing")).is_err());
+        assert!(permission_error(&std::io::Error::from_raw_os_error(libc::EPERM)));
+        assert!(permission_error(&std::io::Error::from_raw_os_error(libc::EACCES)));
+        assert!(!permission_error(&std::io::Error::from_raw_os_error(libc::ENOENT)));
+        fs::remove_dir(folder).unwrap();
+    }
+    #[test]
     fn recovery_requires_recording_or_project_data() {
         let work = std::env::temp_dir().join(format!("saturn-recovery-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(work.join("media")).unwrap();
@@ -1010,6 +1081,28 @@ mod session_defaults_tests {
         fs::remove_file(work.join("media/source.mov")).unwrap();
         fs::write(work.join("manifest.json"), b"{}").unwrap();
         assert!(has_recoverable_data(&work));
+        fs::remove_dir_all(work).unwrap();
+    }
+    #[test]
+    fn completed_recovery_is_not_offered_after_restart() {
+        let work = std::env::temp_dir().join(format!("saturn-recovered-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(work.join("media")).unwrap();
+        fs::write(work.join("manifest.json"), b"fixture").unwrap();
+        fs::write(work.join("dirty"), b"").unwrap();
+        assert!(is_recovery_candidate(&work));
+        mark_recovery_complete(&work).unwrap();
+        assert!(!is_recovery_candidate(&work));
+        mark_recovery_complete(&work).unwrap();
+        // A later unsaved change must still be offered for recovery.
+        fs::write(work.join("dirty"), b"").unwrap();
+        assert!(is_recovery_candidate(&work));
+        fs::remove_dir_all(work).unwrap();
+    }
+    #[test]
+    fn failure_to_clear_recovery_marker_is_not_success() {
+        let work = std::env::temp_dir().join(format!("saturn-marker-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(work.join("dirty")).unwrap();
+        assert!(mark_recovery_complete(&work).is_err());
         fs::remove_dir_all(work).unwrap();
     }
     #[test]

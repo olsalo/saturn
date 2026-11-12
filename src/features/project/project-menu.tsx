@@ -72,7 +72,14 @@ export function ProjectMenu({
               onClick={() => run(() => api.export(true))}
             >
               <Icon name="download" />
-              Export to…
+              Export web to…
+            </MenuItem>
+            <MenuItem
+              disabled={disabled}
+              onClick={() => run(() => api.export(true, "h264"))}
+            >
+              <Icon name="download" />
+              Export MP4 to…
             </MenuItem>
           </>
         )}

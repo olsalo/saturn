@@ -1,0 +1,9 @@
+Unmodified libaom 3.15.1, BSD-2-Clause with separate patent terms.
+Source: https://storage.googleapis.com/aom-releases/libaom-3.15.1.tar.gz
+SHA-256: 8ca0c52746174603500f0adb6f2a215d69c9ca2aab2acb3caa06fb791d8d01bf
+Complete source is included alongside this file. With CMake 3.31.6 and Apple command-line tools:
+tar -xf libaom-3.15.1.tar.gz
+cmake -S libaom-3.15.1 -B build -DCMAKE_INSTALL_PREFIX="$PWD/aom-install" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_INSTALL_LIBDIR=lib -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DENABLE_DOCS=OFF
+cmake --build build --parallel 8
+cmake --install build
+Saturn's build bootstraps CMake and pkgconf locally; neither build tool is bundled in the app.

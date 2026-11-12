@@ -62,6 +62,7 @@ export type Snapshot = {
   error: string | null;
   progress: number;
   outputPath: string | null;
+  outputIsWebsite?: boolean;
   jobId: string | null;
   pendingCount: number;
   recoveries: string[];

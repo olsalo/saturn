@@ -20,9 +20,10 @@
     "desktop:build": "node scripts/desktop.mjs --rebuild",
     "desktop:repair": "node scripts/desktop.mjs --repair-permissions",
     "test:launcher": "node --test scripts/desktop-permissions.test.mjs",
-    "setup:encoder": "node scripts/prepare-handbrake.mjs && node scripts/prepare-ffmpeg.mjs",
+    "setup:encoder": "node scripts/prepare-ffmpeg.mjs",
     "test:compact": "bash scripts/verify-compact.sh",
-    "showcase": "vite --host 127.0.0.1 --port 1421 --open /showcase.html"
+    "showcase": "vite --host 127.0.0.1 --port 1421 --open /showcase.html",
+    "test:web": "bash scripts/verify-web.sh"
   },
   "dependencies": {
     "@base-ui/react": "^1.0.0",

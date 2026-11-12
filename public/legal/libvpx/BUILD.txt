@@ -1,0 +1,8 @@
+Unmodified libvpx 1.16.0.
+Source: https://github.com/webmproject/libvpx/archive/refs/tags/v1.16.0.tar.gz
+SHA-256: 7a479a3c66b9f5d5542a4c6a1b7d3768a983b1e5c14c60a9396edc9b649e015c
+Complete source is included alongside this file. Build with Apple command-line tools; Opus also requires CMake.
+Configure options used: --prefix=/Users/olli/Desktop/saturn/src-tauri/target/encoder-tools/libvpx-1.16.0-arm64 --disable-shared --enable-static --enable-pic --disable-vp8 --disable-examples --disable-tools --disable-docs --disable-unit-tests --target=arm64-darwin24-gcc --extra-cflags=-mmacosx-version-min=15.0
+./configure [options above]
+make -j8 install
+The installation prefix can be changed to a local staging directory. Link the resulting static library into FFmpeg using its pkg-config file.

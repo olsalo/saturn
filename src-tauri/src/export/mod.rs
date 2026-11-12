@@ -1,6 +1,17 @@
 use crate::*;
 use tauri::Manager;
-pub fn start(app: &tauri::AppHandle, choose: bool) -> Result<()> {
+pub fn start(app: &tauri::AppHandle, choose: bool, format: &str) -> Result<()> {
+    let encoder = match format {
+        "web" => "web",
+        "hevc" => "ffmpeg",
+        "h264" => "h264",
+        _ => return Err("Unsupported export format".into()),
+    };
+    let website = match format {
+        "web" => true,
+        "hevc" | "h264" => false,
+        _ => return Err("Unsupported export format".into()),
+    };
     let state = app.state::<Shared>();
     let mut s = lock(&state)?;
     ensure_editable(&s)?;
@@ -10,12 +21,22 @@ pub fn start(app: &tauri::AppHandle, choose: bool) -> Result<()> {
     if !project.path.is_file() {
         return Err("Project moved or was removed. Use Save As before exporting.".into());
     }
-    let default = unique_path(
-        project.path.parent().unwrap(),
-        &project.path.file_stem().unwrap().to_string_lossy(),
-        "mp4",
-    );
-    let destination = if choose {
+    let stem = project.path.file_stem().unwrap().to_string_lossy();
+    let default = if website {
+        unique_website_path(project.path.parent().unwrap(), &stem)
+    } else {
+        unique_path(project.path.parent().unwrap(), &stem, "mp4")
+    };
+    let destination = if choose && website {
+        let Some(parent) = rfd::FileDialog::new()
+            .set_title("Choose a folder for the website videos")
+            .set_directory(project.path.parent().unwrap())
+            .pick_folder()
+        else {
+            return Ok(());
+        };
+        unique_website_path(&parent, &stem)
+    } else if choose {
         let Some(p) = rfd::FileDialog::new()
             .add_filter("MP4 video", &["mp4"])
             .set_directory(project.path.parent().unwrap())
@@ -44,7 +65,9 @@ pub fn start(app: &tauri::AppHandle, choose: bool) -> Result<()> {
     project::disk::ensure_space(&project.work, master_bytes.max(256 * 1024 * 1024))?;
     project::disk::ensure_space(
         destination.parent().ok_or("Invalid export destination")?,
-        source_bytes.saturating_mul(2).max(256 * 1024 * 1024),
+        source_bytes
+            .saturating_mul(if website { 4 } else { 2 })
+            .max(256 * 1024 * 1024),
     )?;
     if destination == project.path {
         return Err("Export must be separate from the project".into());
@@ -53,16 +76,20 @@ pub fn start(app: &tauri::AppHandle, choose: bool) -> Result<()> {
         save_current(app, &mut s)?;
     }
     let id = uuid::Uuid::new_v4().to_string();
-    let temp = destination
-        .parent()
-        .unwrap()
-        .join(format!(".saturn-{id}.mp4"));
+    let temp = destination.parent().unwrap().join(if website {
+        format!(".saturn-{id}")
+    } else {
+        format!(".saturn-{id}.mp4")
+    });
     let request = project.work.join("export-request.json");
     let cancel = project.work.join("cancel-export");
     let _ = fs::remove_file(&cancel);
     fs::write(
         &request,
-        serde_json::to_vec(&serde_json::json!({"workspace":project.work,"output":temp})).unwrap(),
+        serde_json::to_vec(
+            &serde_json::json!({"workspace":project.work,"output":temp,"encoder":encoder}),
+        )
+        .unwrap(),
     )
     .map_err(|e| e.to_string())?;
     s.mode = "exporting".into();
@@ -89,20 +116,23 @@ pub fn start(app: &tauri::AppHandle, choose: bool) -> Result<()> {
             if cancel.exists() {
                 return Err("Export cancelled".into());
             }
-            if !finished
-                || !temp.is_file()
-                || fs::metadata(&temp).map_err(|e| e.to_string())?.len() == 0
-            {
-                return Err("Encoder did not produce a valid MP4".into());
+            if !finished {
+                return Err("Encoder did not finish the export".into());
             }
-            fs::File::open(&temp)
-                .map_err(|e| e.to_string())?
-                .sync_all()
-                .map_err(|e| e.to_string())?;
+            validate_export_files(&temp, website)?;
+            if website && destination.exists() {
+                return Err(
+                    "Website export destination already exists; existing files were kept.".into(),
+                );
+            }
             fs::rename(&temp, &destination).map_err(|e| e.to_string())?;
             Ok(())
         });
-        let _ = fs::remove_file(&temp);
+        if website {
+            let _ = fs::remove_dir_all(&temp);
+        } else {
+            let _ = fs::remove_file(&temp);
+        }
         let state = handle.state::<Shared>();
         let mut s = state.inner.lock().unwrap();
         s.job = None;
@@ -122,4 +152,68 @@ pub fn start(app: &tauri::AppHandle, choose: bool) -> Result<()> {
         notify(&handle, &s);
     });
     Ok(())
+}
+
+fn unique_website_path(parent: &Path, name: &str) -> PathBuf {
+    let mut path = parent.join(format!("{name}-web"));
+    let mut number = 2;
+    while path.exists() {
+        path = parent.join(format!("{name}-web {number}"));
+        number += 1;
+    }
+    path
+}
+
+fn validate_export_files(path: &Path, website: bool) -> Result<()> {
+    let files = if website {
+        [
+            "video-av1.webm",
+            "video-vp9.webm",
+            "poster.jpg",
+            "embed.html",
+            "README.txt",
+        ]
+        .into_iter()
+        .map(|name| path.join(name))
+        .collect::<Vec<_>>()
+    } else {
+        vec![path.to_path_buf()]
+    };
+    for file in files {
+        if !file.is_file() || fs::metadata(&file).map_err(|e| e.to_string())?.len() == 0 {
+            return Err("Encoder did not produce all export files".into());
+        }
+        fs::File::open(&file)
+            .map_err(|e| e.to_string())?
+            .sync_all()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn website_exports_require_all_bundle_files() {
+        let root = std::env::temp_dir().join(format!("saturn-web-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        for name in ["video-av1.webm", "video-vp9.webm", "embed.html"] {
+            fs::write(root.join(name), b"fixture").unwrap();
+        }
+        assert!(validate_export_files(&root, true).is_err());
+        fs::write(root.join("README.txt"), b"fixture").unwrap();
+        assert!(validate_export_files(&root, true).is_err());
+        fs::write(root.join("poster.jpg"), b"fixture").unwrap();
+        assert!(validate_export_files(&root, true).is_ok());
+        fs::write(root.join("video-vp9.webm"), b"").unwrap();
+        assert!(validate_export_files(&root, true).is_err());
+        let first = unique_website_path(&root, "recording");
+        fs::create_dir(&first).unwrap();
+        assert_eq!(
+            unique_website_path(&root, "recording"),
+            root.join("recording-web 2")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

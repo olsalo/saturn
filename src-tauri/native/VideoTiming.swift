@@ -96,18 +96,45 @@ func isBlankVideoFrame(_ buffer: CVPixelBuffer) -> Bool {
     return true
 }
 
+/// MP4 movie headers and track edits can use different timescales. A rounded
+/// movie duration may exceed the video by up to one 600 Hz movie tick even
+/// when the tracks end together. This is much shorter than a video frame.
+func exceedsVideoEnd(_ candidate: CMTime, videoEnd: CMTime) -> Bool {
+    candidate > videoEnd + CMTime(value: 1, timescale: 600)
+}
+
+/// Even a sub-frame overrun can make some players display black at the end.
+func needsExportAlignment(_ candidate: CMTime, videoEnd: CMTime) -> Bool {
+    candidate > videoEnd
+}
+
 /// AAC packet padding can outlast the picture even when its input was trimmed.
 /// A passthrough export adds an exact presentation edit without re-encoding.
 func alignExportAudioToVideo(url: URL, cancel: URL) async throws {
+    // A passthrough edit can expose a slightly shorter video track than the
+    // original MP4 reported. Reinspect the actual result before committing it.
+    for _ in 0..<3 {
+        if try await !alignExportAudioPass(url: url, cancel: cancel) { return }
+    }
+    let asset = AVURLAsset(url: url)
+    guard let video = try await asset.loadTracks(withMediaType: .video).first else { throw timingFailure("Export has no video") }
+    let end = CMTimeRangeGetEnd(try await video.load(.timeRange))
+    guard !needsExportAlignment(try await asset.load(.duration), videoEnd: end) else { throw timingFailure("Could not align export audio to video") }
+    for audio in try await asset.loadTracks(withMediaType: .audio) {
+        guard !needsExportAlignment(CMTimeRangeGetEnd(try await audio.load(.timeRange)), videoEnd: end) else { throw timingFailure("Could not align export audio to video") }
+    }
+}
+
+private func alignExportAudioPass(url: URL, cancel: URL) async throws -> Bool {
     let asset = AVURLAsset(url: url)
     guard let video = try await asset.loadTracks(withMediaType: .video).first else { throw timingFailure("Export has no video") }
     let end = CMTimeRangeGetEnd(try await video.load(.timeRange))
     guard end.isNumeric, end > .zero else { throw timingFailure("Export has no video duration") }
-    var needsTrim = try await asset.load(.duration) > end
+    var needsTrim = needsExportAlignment(try await asset.load(.duration), videoEnd: end)
     for audio in try await asset.loadTracks(withMediaType: .audio) {
-        if CMTimeRangeGetEnd(try await audio.load(.timeRange)) > end { needsTrim = true }
+        if needsExportAlignment(CMTimeRangeGetEnd(try await audio.load(.timeRange)), videoEnd: end) { needsTrim = true }
     }
-    guard needsTrim else { return }
+    guard needsTrim else { return false }
     let pending = url.deletingLastPathComponent().appendingPathComponent(".saturn-timing-" + UUID().uuidString + ".mp4")
     defer { try? FileManager.default.removeItem(at: pending) }
     guard !FileManager.default.fileExists(atPath: cancel.path) else { throw timingFailure("Export cancelled") }
@@ -124,6 +151,7 @@ func alignExportAudioToVideo(url: URL, cancel: URL) async throws {
     guard !FileManager.default.fileExists(atPath: cancel.path) else { throw timingFailure("Export cancelled") }
     guard exporter.status == .completed else { throw exporter.error ?? timingFailure("Could not align export audio") }
     _ = try FileManager.default.replaceItemAt(url, withItemAt: pending)
+    return true
 }
 
 /// Inspect the actual last decoded sample, rather than asking an image generator
@@ -139,17 +167,23 @@ func validateVideoEnding(asset: AVAsset) async throws {
     reader.add(output)
     guard reader.startReading() else { throw reader.error ?? timingFailure("Could not validate video ending") }
     var lastPTS = CMTime.invalid
+    var lastSampleEnd = CMTime.invalid
     var visible = false
     while let sample = output.copyNextSampleBuffer() {
         let pts = sample.presentationTimeStamp
         guard pts.isNumeric, !lastPTS.isNumeric || pts >= lastPTS else { continue }
         lastPTS = pts
+        let sampleDuration = sample.duration
+        lastSampleEnd = sampleDuration.isNumeric && sampleDuration > .zero ? pts + sampleDuration : .invalid
         visible = sample.imageBuffer.map { !isBlankVideoFrame($0) } ?? false
     }
     guard reader.status == .completed, visible else { throw reader.error ?? timingFailure("Export ends with a blank frame") }
-    guard try await asset.load(.duration) <= end else { throw timingFailure("Export extends beyond its final video frame") }
+    if lastSampleEnd.isNumeric && exceedsVideoEnd(end, videoEnd: lastSampleEnd) {
+        throw timingFailure("Export extends beyond its final video frame")
+    }
+    guard !exceedsVideoEnd(try await asset.load(.duration), videoEnd: end) else { throw timingFailure("Export extends beyond its final video frame") }
     for audio in try await asset.loadTracks(withMediaType: .audio) {
-        guard CMTimeRangeGetEnd(try await audio.load(.timeRange)) <= end else { throw timingFailure("Export audio extends beyond its final video frame") }
+        guard !exceedsVideoEnd(CMTimeRangeGetEnd(try await audio.load(.timeRange)), videoEnd: end) else { throw timingFailure("Export audio extends beyond its final video frame") }
     }
 }
 

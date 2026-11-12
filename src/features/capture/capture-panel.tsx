@@ -12,7 +12,7 @@ import {
   AlertDialogFooter,
 } from "@/components/ui/alert-dialog";
 import { SourcePicker } from "./source-picker";
-import { CaptureArt } from "./capture-art";
+import captureArt from "@/assets/capture-art.svg";
 import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -244,7 +244,7 @@ export function CapturePanel({
         className={`capture-illustration ${recording ? "is-recording" : ""}`}
         aria-hidden="true"
       >
-        <CaptureArt />
+        <img className="capture-art" src={captureArt} alt="" />
         {recording && (
           <span className="live-badge">
             <i /> REC

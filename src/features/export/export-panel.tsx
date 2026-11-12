@@ -34,6 +34,8 @@ export function ExportPanel({
   run: (f: () => Promise<unknown>) => Promise<boolean>;
 }) {
   const p = state.project!;
+  const [websiteExport, setWebsiteExport] = useState(true);
+  const exportFormat = websiteExport ? "web" : "h264";
   const [pendingAspect, setPendingAspect] = useState<string | null>(null);
   const [pendingResolution, setPendingResolution] = useState<string | null>(
     null,
@@ -94,14 +96,20 @@ export function ExportPanel({
   };
   return (
     <section
-      className={`export-panel animate-in fade-in ${done ? "export-complete" : ""} ${!exporting && (working || state.saving) ? "settings-saving" : ""} ${p.captureKind === "display" ? "screen-capture" : ""}`}
+      className={`export-panel animate-in fade-in ${done ? "export-complete" : ""} ${exporting ? "exporting" : ""} ${!exporting && (working || state.saving) ? "settings-saving" : ""} ${p.captureKind === "display" ? "screen-capture" : ""}`}
     >
       <div className="export-heading">
         <div>
           <span className="eyebrow">
             {done ? "EXPORT COMPLETE" : "EXPORT SETTINGS"}
           </span>
-          <h1>{done ? "Video saved" : "Export recording"}</h1>
+          <h1>
+            {done
+              ? state.outputIsWebsite
+                ? "Website videos saved"
+                : "Video saved"
+              : "Export recording"}
+          </h1>
         </div>
       </div>
       <RecordingPreview project={p} />
@@ -124,8 +132,9 @@ export function ExportPanel({
             {fileName(state.outputPath ?? "")}
           </p>
           <p className="done-description">
-            Your MP4 is saved next to your project, unless you chose another
-            location.
+            {state.outputIsWebsite
+              ? "Your folder contains AV1 video, a VP9 fallback, a poster and an embed snippet. Upload them together to your website."
+              : "Your MP4 is saved next to your project, unless you chose another location."}
           </p>
           <div className="completion-actions">
             <Button
@@ -210,7 +219,7 @@ export function ExportPanel({
             </Select>
           </div>
           <div className="background-row">
-            <div>
+            <div className={exporting ? "option-label-disabled" : undefined}>
               <strong>Resolution</strong>
               <p>
                 {p.exportWidth} × {p.exportHeight} pixels
@@ -249,39 +258,50 @@ export function ExportPanel({
               </SelectPopup>
             </Select>
           </div>
-          {p.separateAudio && (p.hasSystemAudio || p.hasMicrophoneAudio) && (
-            <div className="export-audio-settings">
-              <strong>Audio in exported video</strong>
-              <div className="audio-options">
-                {p.hasSystemAudio && (
-                  <label>
-                    <span>System sound</span>
-                    <Switch
-                      aria-label="Include system sound in export"
-                      checked={selectedAudio.system}
-                      disabled={disabled}
-                      onCheckedChange={(enabled) =>
-                        updateAudio(enabled, selectedAudio.microphone)
-                      }
-                    />
-                  </label>
-                )}
-                {p.hasMicrophoneAudio && (
-                  <label>
-                    <span>Microphone audio</span>
-                    <Switch
-                      aria-label="Include microphone audio in export"
-                      checked={selectedAudio.microphone}
-                      disabled={disabled}
-                      onCheckedChange={(enabled) =>
-                        updateAudio(selectedAudio.system, enabled)
-                      }
-                    />
-                  </label>
-                )}
-              </div>
+          <div className="website-export-setting">
+            <label htmlFor="website-export" className={exporting ? "option-label-disabled" : undefined}>
+              <strong>Web export</strong>
+              <span id="website-export-description">
+                AV1 and VP9 videos
+              </span>
+            </label>
+            <Switch
+              id="website-export"
+              aria-describedby="website-export-description"
+              checked={websiteExport}
+              disabled={disabled}
+              onCheckedChange={setWebsiteExport}
+            />
+          </div>
+          <div className="export-audio-settings">
+            <strong>Audio</strong>
+            <div className="audio-options">
+              <label data-unavailable={!p.separateAudio || !p.hasSystemAudio || undefined}>
+                <span>System sound</span>
+                <Switch
+                  aria-label="Include system sound in export"
+                  data-available={p.separateAudio && p.hasSystemAudio ? "true" : undefined}
+                  checked={p.separateAudio && p.hasSystemAudio && selectedAudio.system}
+                  disabled={disabled || !p.separateAudio || !p.hasSystemAudio}
+                  onCheckedChange={(enabled) =>
+                    updateAudio(enabled, selectedAudio.microphone)
+                  }
+                />
+              </label>
+              <label data-unavailable={!p.separateAudio || !p.hasMicrophoneAudio || undefined}>
+                <span>Microphone audio</span>
+                <Switch
+                  aria-label="Include microphone audio in export"
+                  data-available={p.separateAudio && p.hasMicrophoneAudio ? "true" : undefined}
+                  checked={p.separateAudio && p.hasMicrophoneAudio && selectedAudio.microphone}
+                  disabled={disabled || !p.separateAudio || !p.hasMicrophoneAudio}
+                  onCheckedChange={(enabled) =>
+                    updateAudio(selectedAudio.system, enabled)
+                  }
+                />
+              </label>
             </div>
-          )}
+          </div>
           {actionFooter &&
             createPortal(
               exporting ? (
@@ -317,12 +337,12 @@ export function ExportPanel({
                 <Button
                   className="w-full export-button"
                   size="lg"
-                  onClick={() => run(() => api.export())}
+                  onClick={() => run(() => api.export(false, exportFormat))}
                   disabled={disabled}
                 >
                   <span className="export-button-label">
                     <Icon name="download" />
-                    Export MP4
+                    {websiteExport ? "Export web" : "Export MP4"}
                   </span>
                   <span className="export-button-details">{`${p.exportWidth} × ${p.exportHeight}  ·  ${aspectLabel}  ·  ${p.exportFps} fps`}</span>
                 </Button>

@@ -17,3 +17,5 @@ node_modules/
 /junk/
 .DS_Store
 *.log
+
+src-tauri/binaries/ffprobe-*

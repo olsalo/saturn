@@ -23,6 +23,15 @@ export function RecordingPreview({ project }: { project: Project }) {
     project.width,
     project.height,
   );
+  // Recordly's three shadow layers at 20% intensity, scaled to the preview.
+  const shadowScale = previewWidth / canvas.width;
+  const shadow = [
+    [2.4, 9.6, 0.14],
+    [0.8, 3.2, 0.1],
+    [0.4, 1.6, 0.06],
+  ]
+    .map(([offset, blur, alpha]) => `0 ${offset * shadowScale}px ${blur * 2 * shadowScale}px rgba(0, 0, 0, ${alpha})`)
+    .join(", ");
   const layout = exportLayout(
     project.width,
     project.height,
@@ -56,7 +65,7 @@ export function RecordingPreview({ project }: { project: Project }) {
             : undefined,
           boxShadow:
             project.appearance.shadow && b.type !== "none"
-              ? "0 6px 20px #0005"
+              ? shadow
               : undefined,
         }}
       >

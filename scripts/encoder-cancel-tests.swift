@@ -1,12 +1,12 @@
 import Foundation
 
-@main struct HandBrakeCancellationTests {
+@main struct EncoderCancellationTests {
     static func main() async throws {
         let folder = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("saturn-cancel-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let cancel = folder.appendingPathComponent("cancel")
-        let encoder: ExportEncoder = CommandLine.arguments.contains("--ffmpeg") ? .ffmpeg : (CommandLine.arguments.contains("--videotoolbox") ? .videoToolbox : .handBrake)
+        let encoder: ExportEncoder = .ffmpeg
         do {
             try await encodeVideo(input: URL(fileURLWithPath: CommandLine.arguments[1]),
                 output: folder.appendingPathComponent("cancelled.mp4"), cancel: cancel, encoder: encoder) { _ in
