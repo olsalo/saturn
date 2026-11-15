@@ -4,7 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)), "~": fileURLToPath(new URL("./src", import.meta.url)), "@coss/ui/lib": fileURLToPath(new URL("./src/lib", import.meta.url)), "@coss/ui/components": fileURLToPath(new URL("./src/components/ui", import.meta.url)) } },
+  resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)), "~": fileURLToPath(new URL("./src", import.meta.url)) } },
   server: {
     port: 1420,
     strictPort: true,

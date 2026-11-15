@@ -1,4 +1,4 @@
-const bundleID = "com.saturn.recorder";
+const bundleID = "com.saturn.recorder.local";
 
 export function captureIdentity(signature, bundle) {
   const requirement = signature.match(/^#?\s*designated => (.+)$/m)?.[1];
@@ -11,11 +11,12 @@ export function captureIdentity(signature, bundle) {
       "Saturn's app signature is invalid. Refusing to launch a build with the wrong privacy identity.",
     );
   }
-  return { version: 1, bundle, requirement };
+  const cdhash = signature.match(/^CDHash=(.+)$/m)?.[1] ?? null;
+  return { version: 1, bundle, requirement, cdhash };
 }
 
-// Compare designated requirements, not executable hashes: certificate-signed
-// builds can retain consent even when their executable bytes change.
+// Repair stale ad-hoc grants once per changed local build. A later launch of
+// that same build must preserve the newly approved decision.
 export async function prepareCapturePermission({
   previous,
   current,
@@ -25,8 +26,7 @@ export async function prepareCapturePermission({
   remember,
 }) {
   const changed =
-    previous?.bundle === current.bundle &&
-    typeof previous.requirement === "string" &&
+    typeof previous?.requirement === "string" &&
     previous.requirement !== current.requirement;
   if (force || changed) {
     // Never revoke consent or restart the app during an active recording.

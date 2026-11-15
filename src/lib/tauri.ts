@@ -19,6 +19,9 @@ function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
 }
 export const api = {
   snapshot: () => call<Snapshot>("get_snapshot"),
+  frontendReady: () => call<void>("frontend_ready"),
+  prepareRecordingsFolder: () => call<boolean>("prepare_recordings_folder"),
+  changeRecordingsFolder: () => call<void>("change_recordings_folder"),
   sources: () =>
     call<{
       sources: CaptureSource[];
@@ -46,6 +49,8 @@ export const api = {
       options: { source, systemAudio, microphone },
     }),
   stop: () => call<void>("stop_recording"),
+  pause: () => call<void>("pause_recording"),
+  continue: () => call<void>("continue_recording"),
   open: (pending = false) => call<void>("open_project", { pending }),
   appearance: (appearance: Appearance) =>
     call<void>("update_project_appearance", { appearance }),
@@ -59,10 +64,8 @@ export const api = {
     call<void>("choose_builtin_background", { preset }),
   save: () => call<void>("save_project"),
   saveAs: () => call<void>("save_project_as"),
-  export: (
-    chooseDestination = false,
-    exportFormat: "web" | "hevc" | "h264" = "web",
-  ) => call<void>("start_export", { chooseDestination, exportFormat }),
+  export: (chooseDestination = false, exportFormat: "web" | "h264" = "web") =>
+    call<void>("start_export", { chooseDestination, exportFormat }),
   cancel: (jobId: string) => call<void>("cancel_export", { jobId }),
   file: (action: "reveal" | "copy-file" | "copy-path", exported = false) =>
     call<void>("file_action", { action, exported }),
@@ -78,6 +81,8 @@ export const api = {
     }),
   subscribe: (callback: (snapshot: Snapshot) => void) =>
     listen<Snapshot>("recorder://snapshot", (e) => callback(e.payload)),
+  subscribePauseShortcut: (callback: () => void) =>
+    listen("recorder://toggle-pause", callback),
   subscribeRecordingShortcut: (callback: () => void) =>
     listen("recorder://toggle-recording", callback),
 };

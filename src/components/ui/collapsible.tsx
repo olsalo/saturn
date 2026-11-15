@@ -14,7 +14,7 @@ function CollapsibleTrigger({
 }: CollapsiblePrimitive.Trigger.Props) {
   return (
     <CollapsiblePrimitive.Trigger
-      className={cn("cursor-pointer", className)}
+      className={cn("cursor-default", className)}
       data-slot="collapsible-trigger"
       {...props}
     />

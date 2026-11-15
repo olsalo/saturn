@@ -15,6 +15,7 @@ import Icon from "./icons/icons"
 import { cn } from "./utils/utils";
 import { Button } from "./button";
 import { ScrollArea } from "./scroll-area";
+import { ModalDragRegion } from "./overlays/modal-drag-region";
 import { getDialogPopupClassName, getDialogViewportClassName } from "./overlays/dialog-popup-styles"
 
 const DialogCreateHandle = DialogPrimitive.createHandle;
@@ -183,6 +184,7 @@ function DialogPopup({
           viewportClassName,
         )}
       >
+        <ModalDragRegion />
         <DialogPrimitive.Popup
           className={getDialogPopupClassName({
             bottomStickOnMobile,

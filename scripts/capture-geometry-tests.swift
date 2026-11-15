@@ -28,8 +28,39 @@ import CoreGraphics
         }
         assert(abs(exportCornerRadius(21, canvasWidth: 3584) - 29.4) < 0.0001)
         assert(exportCornerRadius(21, canvasWidth: 2560) == 21)
+        // Native window corners retain their source-pixel size as the window
+        // shrinks. The mask must grow with upscaled footage, not just the canvas.
+        for width in [160, 320, 640, 1600] {
+            let height = width * 5 / 8
+            let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                    bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            context.setFillColor(CGColor(gray: 0, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.setFillColor(CGColor(gray: 0.95, alpha: 1))
+            context.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: width, height: height), cornerWidth: 24, cornerHeight: 24, transform: nil))
+            context.fillPath()
+            let measured = recordedCornerRadius(context.makeImage()!)
+            assert(measured >= 24 && measured < 34, "Recover the native radius including its antialiased fringe at every window size: \(measured)")
+            let destination = exportVideoRect(source: CGSize(width: width, height: height), canvas: CGSize(width: 1280, height: 800), paddingPercent: 38, paddingPixels: 64, none: false)
+            let radius = max(exportCornerRadius(21, canvasWidth: 1280), measured * destination.width / CGFloat(width))
+            assert(radius >= 24 * destination.width / CGFloat(width))
+            context.setFillColor(CGColor(gray: 0, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.setFillColor(CGColor(gray: 0.2, alpha: 1))
+            context.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: width, height: height), cornerWidth: 24, cornerHeight: 24, transform: nil))
+            context.fillPath()
+            let darkRadius = recordedCornerRadius(context.makeImage()!)
+            assert(darkRadius >= 24 && darkRadius < 34, "Dark window chrome must also hide its corner matte")
+            // Square bright windows and solid black content need no inferred mask.
+            for gray: CGFloat in [0, 0.2, 0.95] {
+                context.setFillColor(CGColor(gray: gray, alpha: 1))
+                context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+                assert(recordedCornerRadius(context.makeImage()!) == 0)
+            }
+        }
         let layout = exportVideoRect(source: CGSize(width: 640, height: 400), canvas: CGSize(width: 1920, height: 1200), paddingPercent: 38, paddingPixels: 64, none: false)
-        assert(abs(layout.minX - 145.92) < 0.0001 && abs(layout.minY - 91.2) < 0.0001, "Match Recordly 38%: 7.6% of each canvas dimension per edge")
+        assert(abs(layout.minX - 145.92) < 0.0001 && abs(layout.minY - 91.2) < 0.0001, "Match 38% padding: 7.6% of each canvas dimension per edge")
         assert(abs(layout.width - 1628.16) < 0.0001 && abs(layout.height - 1017.6) < 0.0001)
         let noBackground = exportVideoRect(source: CGSize(width: 640, height: 400), canvas: CGSize(width: 1920, height: 1200), paddingPercent: 38, paddingPixels: 64, none: true)
         assert(noBackground == CGRect(x:0,y:0,width:1920,height:1200))

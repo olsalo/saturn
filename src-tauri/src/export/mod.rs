@@ -3,13 +3,12 @@ use tauri::Manager;
 pub fn start(app: &tauri::AppHandle, choose: bool, format: &str) -> Result<()> {
     let encoder = match format {
         "web" => "web",
-        "hevc" => "ffmpeg",
         "h264" => "h264",
         _ => return Err("Unsupported export format".into()),
     };
     let website = match format {
         "web" => true,
-        "hevc" | "h264" => false,
+        "h264" => false,
         _ => return Err("Unsupported export format".into()),
     };
     let state = app.state::<Shared>();

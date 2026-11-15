@@ -48,6 +48,9 @@ pub enum Background {
     Gradient {
         preset: String,
     },
+    Solid {
+        color: String,
+    },
     EmbeddedImage {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,8 +72,8 @@ pub struct Appearance {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            background: Background::Gradient {
-                preset: "dawn".into(),
+            background: Background::Solid {
+                color: "white".into(),
             },
             padding_px: 64,
             padding_percent: Some(38.0),
@@ -103,12 +106,28 @@ fn default_enabled() -> bool {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Clip {
+    pub id: String,
+    pub media: Media,
+    pub cursor: Cursor,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceClip {
+    pub clip_id: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub format_version: u32,
     pub project_id: String,
     pub created_at: String,
     pub media: Media,
     pub cursor: Cursor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<Clip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequence: Vec<SequenceClip>,
     pub appearance: Appearance,
     #[serde(rename = "export")]
     pub export_settings: ExportSettings,
@@ -138,10 +157,12 @@ impl Manifest {
                 time_unit: "microseconds".into(),
                 coordinate_space: "capturedVideoPixels".into(),
             },
+            clips: vec![],
+            sequence: vec![],
             appearance: Appearance::default(),
             export_settings: ExportSettings {
                 container: "mp4".into(),
-                codec: "hevc".into(),
+                codec: "h264".into(),
                 width: 2560,
                 height: 1600,
                 frame_rate: 30,
@@ -153,6 +174,43 @@ impl Manifest {
         };
         manifest.update_export_dimensions();
         manifest
+    }
+    pub fn set_clips(&mut self, clips: Vec<Clip>) -> Result<(), String> {
+        let first = clips.first().ok_or("No completed clips")?;
+        self.media = first.media.clone();
+        self.cursor = first.cursor.clone();
+        self.media.duration_us = clips.iter().map(|c| c.media.duration_us).sum();
+        self.sequence = clips
+            .iter()
+            .map(|c| SequenceClip {
+                clip_id: c.id.clone(),
+            })
+            .collect();
+        self.clips = clips;
+        self.format_version = 2;
+        self.validate()
+    }
+    pub fn sources(&self) -> Vec<(&Media, &Cursor)> {
+        if self.clips.is_empty() {
+            vec![(&self.media, &self.cursor)]
+        } else {
+            self.clips.iter().map(|c| (&c.media, &c.cursor)).collect()
+        }
+    }
+    pub fn source_entries(&self) -> Vec<String> {
+        let mut entries = vec![];
+        for (media, cursor) in self.sources() {
+            entries.extend([media.path.clone(), cursor.path.clone()]);
+            if let Some(audio) = &media.separate_audio {
+                entries.extend(
+                    [&audio.system, &audio.microphone]
+                        .into_iter()
+                        .flatten()
+                        .map(|a| a.path.clone()),
+                );
+            }
+        }
+        entries
     }
     pub fn set_display_capture(&mut self) {
         self.media.capture_kind = "display".into();
@@ -207,13 +265,89 @@ impl Manifest {
         self.export_settings.height = ((height / 2.0).floor() as u32 * 2).max(2);
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.format_version != 1 {
+        if ![1, 2].contains(&self.format_version) {
             return Err("Unsupported project version. Update Saturn to open this project.".into());
         }
         if uuid::Uuid::parse_str(&self.project_id).is_err()
             || chrono::DateTime::parse_from_rfc3339(&self.created_at).is_err()
         {
             return Err("Invalid project identity".into());
+        }
+        if !self.clips.is_empty() {
+            if self.format_version != 2
+                || self.clips.len() > 1000
+                || self.sequence.len() != self.clips.len()
+            {
+                return Err("Invalid clip sequence".into());
+            }
+            let mut ids = std::collections::HashSet::new();
+            for clip in &self.clips {
+                if !valid_clip_id(&clip.id) || !ids.insert(&clip.id) {
+                    return Err("Invalid or duplicate clip ID".into());
+                }
+                let prefix = format!("clips/{}/", clip.id);
+                let mut single = self.clone();
+                single.format_version = 1;
+                single.clips.clear();
+                single.sequence.clear();
+                single.media = clip.media.clone();
+                single.cursor = clip.cursor.clone();
+                single.media.path = clip
+                    .media
+                    .path
+                    .strip_prefix(&prefix)
+                    .ok_or("Invalid clip media path")?
+                    .into();
+                single.cursor.path = clip
+                    .cursor
+                    .path
+                    .strip_prefix(&prefix)
+                    .ok_or("Invalid clip cursor path")?
+                    .into();
+                if let Some(audio) = &mut single.media.separate_audio {
+                    for track in [&mut audio.system, &mut audio.microphone]
+                        .into_iter()
+                        .flatten()
+                    {
+                        track.path = track
+                            .path
+                            .strip_prefix(&prefix)
+                            .ok_or("Invalid clip audio path")?
+                            .into();
+                    }
+                }
+                single.validate()?;
+            }
+            let mut used = std::collections::HashSet::new();
+            let mut duration = 0u64;
+            for entry in &self.sequence {
+                let clip = self
+                    .clips
+                    .iter()
+                    .find(|c| c.id == entry.clip_id)
+                    .ok_or("Missing sequence clip")?;
+                if !used.insert(&entry.clip_id) {
+                    return Err("Duplicate sequence clip".into());
+                }
+                duration = duration
+                    .checked_add(clip.media.duration_us)
+                    .ok_or("Invalid sequence duration")?;
+            }
+            if duration != self.media.duration_us || duration > 86_400_000_000 {
+                return Err("Invalid sequence duration".into());
+            }
+            // Validate the summary's settings through the first source's normal validation.
+            let mut single = self.clone();
+            single.clips.clear();
+            single.sequence.clear();
+            single.format_version = 1;
+            single.media.path = "media/source.mov".into();
+            single.media.separate_audio = None;
+            single.cursor.path = "cursor/events.jsonl".into();
+            return single.validate();
+        }
+        if !self.sequence.is_empty() || self.format_version != 1 {
+            return Err("Missing project clips".into());
         }
         if !["media/source.mov", "media/source.mp4"].contains(&self.media.path.as_str())
             || self.cursor.path != "cursor/events.jsonl"
@@ -283,6 +417,9 @@ impl Appearance {
             return Err("Unsupported appearance settings".into());
         }
         match &self.background {
+            Background::Solid { color } if !["white", "black"].contains(&color.as_str()) => {
+                Err("Unknown background color".into())
+            }
             Background::Gradient { preset }
                 if !["dawn", "dusk", "mint", "ink"].contains(&preset.as_str()) =>
             {
@@ -301,6 +438,26 @@ impl Appearance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn solid_backgrounds_round_trip_and_validate() {
+        for color in ["white", "black"] {
+            let mut appearance = Appearance::default();
+            appearance.background = Background::Solid {
+                color: color.into(),
+            };
+            let json = serde_json::to_string(&appearance).unwrap();
+            let restored: Appearance = serde_json::from_str(&json).unwrap();
+            assert!(restored.validate().is_ok());
+            assert!(
+                matches!(restored.background, Background::Solid { color: ref actual } if actual == color)
+            );
+        }
+        let mut appearance = Appearance::default();
+        appearance.background = Background::Solid {
+            color: "red".into(),
+        };
+        assert!(appearance.validate().is_err());
+    }
     #[test]
     fn display_capture_roundtrips_and_old_projects_default_to_window() {
         let mut m = Manifest::new(1_000_000, 1920, 1080, false, false);
@@ -399,4 +556,8 @@ mod tests {
             }
         }
     }
+}
+
+pub fn valid_clip_id(id: &str) -> bool {
+    id.len() == 4 && id.bytes().all(|c| c.is_ascii_digit()) && id != "0000"
 }

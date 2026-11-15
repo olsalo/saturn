@@ -175,6 +175,15 @@ button {
   box-shadow: none;
 }
 
+/* Saturn switch shape, including its pressed state. */
+[data-slot="switch"] {
+  border-radius: 3px;
+}
+
+[data-slot="switch"] [data-slot="switch-thumb"] {
+  border-radius: 2px;
+}
+
 /* Saturn checkbox and radio shapes. */
 [data-slot="checkbox"],
 [data-slot="checkbox-indicator"],
@@ -189,7 +198,7 @@ button {
 }
 
 [data-slot="radio-indicator"]::before {
-  border-radius: 0;
+  border-radius: 1px;
 }
 
 
@@ -257,6 +266,15 @@ button {
 
 [data-slot="button"][data-ui-button]::before {
   border-radius: 5px;
+}
+
+/* Toolbar buttons use the same corners as menu items. */
+[data-slot="toolbar"] [data-slot="toolbar-button"] {
+  border-radius: 2px;
+}
+
+[data-slot="toolbar"] [data-slot="toolbar-button"]::before {
+  border-radius: 1px;
 }
 
 /* Match group text to the flat Saturn buttons beside it. */

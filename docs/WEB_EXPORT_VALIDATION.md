@@ -2,7 +2,7 @@
 
 Website export uses AV1 first and VP9 as the browser fallback, both in WebM with Opus audio. The compositor renders once. Rust stages `video-av1.webm`, `video-vp9.webm`, `embed.html` and `README.txt`, validates and syncs all four files, then publishes the complete folder under a unique name. A failure or cancellation removes the staged pair. Existing export folders are preserved.
 
-HEVC MP4 retains its prior VideoToolbox Main 10 settings. H.264 VideoToolbox MP4 is a separate compatibility choice.
+Current supported formats are Web and H.264 MP4. The results below describe the historical validation run; HEVC export has since been removed.
 
 ## Builds and tests
 
@@ -11,7 +11,7 @@ HEVC MP4 retains its prior VideoToolbox Main 10 settings. H.264 VideoToolbox MP4
 - The full native suite passed Website AV1/VP9, H.264 MP4 and HEVC. Checks include dimensions, audio, duration, cursor shapes/timing, window seams, video/audio endings, MP4 Fast Start, active cancellation and compositor-master cleanup.
 - The Website test passed full software video decoding, expected codecs/dimensions/audio-track counts, duration, actual AV1 profile/level declarations, source ordering, front-loaded WebM Cues, monotonic progress, existing-folder protection and cancellation cleanup. Its EBML check inspects direct Segment children so a Cues reference inside SeekHead cannot give a false positive.
 - Chromium played the AV1 WebM normally. Marking its source unsupported selected and played VP9; audio decoding was observed and neither path produced a media error.
-- The export selector offers Website, HEVC MP4 and H.264 MP4. Its selected label, color and opacity stayed stable through pending saves for window and screen capture. Pending controls stayed disabled while preserving their normal appearance.
+- At the time of this validation, the export selector offered Website, HEVC MP4 and H.264 MP4. Its selected label, color and opacity stayed stable through pending saves for window and screen capture. Pending controls stayed disabled while preserving their normal appearance.
 
 Logs are `/tmp/saturn-webm-check.log`, `/tmp/saturn-webm-rust.log`, `/tmp/saturn-webm-final-native.log` and `/tmp/saturn-webm-final-tests.log`. Repeat the paired encoder test with `npm run test:web`; compositor integration is included in `npm run test:native`.
 

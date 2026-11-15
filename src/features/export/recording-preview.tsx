@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { exportLayout, previewCanvasSize } from "@/lib/export-layout";
 import Icon from "@/components/ui/icons/icons";
-import { asset } from "@/lib/tauri";
 import type { Project } from "@/lib/contracts";
 import { useBackgroundImage } from "./use-background-image";
+import { usePreviewThumbnail } from "./use-preview-thumbnail";
 export function RecordingPreview({ project }: { project: Project }) {
   const b = project.appearance.background;
   const ref = useRef<HTMLDivElement>(null);
@@ -18,20 +18,24 @@ export function RecordingPreview({ project }: { project: Project }) {
   }, []);
   const scale = previewWidth / 2560;
   const fullScreen = project.captureKind === "display";
+  const thumbnail = usePreviewThumbnail(project.thumbnailPath, !fullScreen);
   const canvas = previewCanvasSize(
     fullScreen ? "original" : project.aspectRatio,
     project.width,
     project.height,
   );
-  // Recordly's three shadow layers at 20% intensity, scaled to the preview.
-  const shadowScale = previewWidth / canvas.width;
+  // Three shadow layers at 20% intensity, scaled to the preview.
+  const shadowScale = previewWidth / project.exportWidth;
   const shadow = [
     [2.4, 9.6, 0.14],
     [0.8, 3.2, 0.1],
     [0.4, 1.6, 0.06],
   ]
-    .map(([offset, blur, alpha]) => `0 ${offset * shadowScale}px ${blur * 2 * shadowScale}px rgba(0, 0, 0, ${alpha})`)
-    .join(", ");
+    .map(
+      ([offset, blur, alpha]) =>
+        `drop-shadow(0 ${offset * shadowScale}px ${blur * shadowScale}px rgba(0, 0, 0, ${alpha}))`,
+    )
+    .join(" ");
   const layout = exportLayout(
     project.width,
     project.height,
@@ -59,14 +63,17 @@ export function RecordingPreview({ project }: { project: Project }) {
           width: fullScreen ? "100%" : `${layout.width * 100}%`,
           height: fullScreen ? "100%" : `${layout.height * 100}%`,
           borderRadius:
-            b.type === "none" ? 0 : project.appearance.cornerRadiusPx * scale,
-          backgroundImage: project.thumbnailPath
-            ? `url("${asset(project.thumbnailPath)}")`
+            b.type === "none"
+              ? 0
+              : Math.max(
+                  project.appearance.cornerRadiusPx * scale,
+                  thumbnail.cornerRadius * previewWidth * layout.width,
+                ),
+          backgroundImage: thumbnail.url
+            ? `url("${thumbnail.url}")`
             : undefined,
-          boxShadow:
-            project.appearance.shadow && b.type !== "none"
-              ? shadow
-              : undefined,
+          filter:
+            project.appearance.shadow && b.type !== "none" ? shadow : undefined,
         }}
       >
         {!project.thumbnailPath && (

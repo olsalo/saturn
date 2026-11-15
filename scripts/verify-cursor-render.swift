@@ -83,7 +83,7 @@ import AppKit
         assert(abs(Double(arrowAreas[0]) / normal - 1) < 0.05, "No bounce before the recorded click")
         assert(Double(arrowAreas[2]) / normal < 0.96 && Double(arrowAreas[2]) / normal > 0.70, "Encoded cursor must compress on click: \(arrowAreas)")
         assert(Double(arrowAreas[3]) / normal > 1.01 && Double(arrowAreas[3]) / normal < 1.15, "Encoded cursor must rebound subtly: \(arrowAreas)")
-        assert(abs(Double(arrowAreas[4]) / normal - 1) < 0.05, "Encoded cursor must settle to native 1.75x size")
-        print("Encoded cursor render passed: no movement during a missing-data gap, exact arrival at the recorded timestamp, 1.75x native arrow/text/hand shapes at their exact hotspots, click compression/rebound/settling, unclipped sprites crossing the window edge and legacy movement outside it, source animation/tooltip frames remain on time, and the actual last encoded frame retains the final video content.")
+        assert(abs(Double(arrowAreas[4]) / normal - 1) < 0.05, "Encoded cursor must settle to native 2x size")
+        print("Encoded cursor render passed: no movement during a missing-data gap, exact arrival at the recorded timestamp, 2x native arrow/text/hand shapes at their exact hotspots, click compression/rebound/settling, unclipped sprites crossing the window edge and legacy movement outside it, source animation/tooltip frames remain on time, and the actual last encoded frame retains the final video content.")
     }
 }

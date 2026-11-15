@@ -15,7 +15,8 @@ import AVFoundation
         reader.add(output)
         guard reader.startReading() else { throw reader.error! }
         let size = try await track.load(.naturalSize)
-        let rect = exportVideoRect(source: CGSize(width: 640, height: 400),
+        let roundedWindow = CommandLine.arguments.contains("--rounded-window")
+        let rect = exportVideoRect(source: roundedWindow ? CGSize(width: 320, height: 200) : CGSize(width: 640, height: 400),
                                   canvas: size,
                                   paddingPercent: 38, paddingPixels: 64, none: false)
         var frames = 0
@@ -24,6 +25,22 @@ import AVFoundation
             defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
             let bytes = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
             let stride = CVPixelBufferGetBytesPerRow(buffer)
+            if roundedWindow {
+                for right in [false, true] {
+                    for bottom in [false, true] {
+                        for dy in 0..<100 {
+                            for dx in 0..<100 {
+                                let x = Int(right ? rect.maxX : rect.minX) + (right ? -dx : dx)
+                                let y = Int(bottom ? rect.maxY : rect.minY) + (bottom ? -dy : dy)
+                                let i = y * stride + x * 4
+                                guard min(bytes[i], bytes[i + 1], bytes[i + 2]) > 25 else {
+                                    throw NSError(domain: "CornerRenderTest", code: 1, userInfo: [NSLocalizedDescriptionKey: "Recorded corner matte leaked at frame \(frames), pixel \(x),\(y)"])
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             for edge in [rect.minX, rect.maxX] {
                 for x in (Int(floor(edge)) - 4)...(Int(ceil(edge)) + 4) {
                     for y in [900, 1080, 1300] {
@@ -42,6 +59,10 @@ import AVFoundation
         guard reader.status == .completed, frames == 60 else {
             throw reader.error ?? NSError(domain: "EdgeRenderTest", code: 2)
         }
-        print("Window edge regression passed: all \(frames) encoded frames have clean left/right rims.")
+        if roundedWindow {
+            print("Small-window corner regression passed: all four corners and both rims are clean in all \(frames) encoded frames.")
+        } else {
+            print("Window edge regression passed: all \(frames) encoded frames have clean left/right rims.")
+        }
     }
 }

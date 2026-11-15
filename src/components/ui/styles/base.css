@@ -1,5 +1,11 @@
 @custom-variant dark (&:where(.dark, .dark *):not(:where(.form-theme-light, .form-theme-light *)));
 
+@layer base {
+  :where(button, summary, label, [role="button"]) {
+    cursor: default;
+  }
+}
+
 @custom-variant md {
   @media (min-width: 768px) and (pointer: fine),
     (min-width: 768px) and (min-height: 600px),
@@ -191,5 +197,32 @@
 
   100% {
     scale: 1;
+  }
+}
+
+/* Animate switch state without animating changes to theme colors. */
+@property --switch-on {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
+}
+
+[data-slot="switch"] {
+  --switch-on: 0;
+  background-color: color-mix(
+    in srgb,
+    var(--primary) calc(var(--switch-on) * 100%),
+    var(--input)
+  );
+  transition: box-shadow 200ms, --switch-on 150ms;
+}
+
+[data-slot="switch"][data-checked] {
+  --switch-on: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="switch"] {
+    transition: none;
   }
 }

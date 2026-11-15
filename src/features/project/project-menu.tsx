@@ -12,10 +12,14 @@ import { api, native } from "@/lib/tauri";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 export function ProjectMenu({
   hasProject,
+  recordingView,
+  recordingsFolderAvailable,
   disabled,
   run,
 }: {
   hasProject: boolean;
+  recordingView: boolean;
+  recordingsFolderAvailable: boolean;
   disabled: boolean;
   run: (f: () => Promise<unknown>) => Promise<boolean>;
 }) {
@@ -30,7 +34,10 @@ export function ProjectMenu({
       </MenuTrigger>
       <MenuPopup align="end" sideOffset={8} className="project-menu">
         <MenuGroup>
-          <MenuItem disabled={disabled} onClick={() => run(api.newRecording)}>
+          <MenuItem
+            disabled={disabled || recordingView}
+            onClick={() => run(api.newRecording)}
+          >
             <Icon name="plus" />
             New recording
           </MenuItem>
@@ -41,6 +48,15 @@ export function ProjectMenu({
             <Icon name="folder" />
             Open project…
           </MenuItem>
+          {recordingView && (
+            <MenuItem
+              disabled={disabled || !native || !recordingsFolderAvailable}
+              onClick={() => run(api.changeRecordingsFolder)}
+            >
+              <Icon name="folder" />
+              Save location…
+            </MenuItem>
+          )}
         </MenuGroup>
         {hasProject && (
           <>

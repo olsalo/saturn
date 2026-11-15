@@ -179,7 +179,7 @@ Do **not** claim the filter is watermark-free until it has been tested. Run a sh
 
 1. `SCContentFilter` for a **single desktop-independent window** (baseline).
 2. **Display + including selected window** (potential isolated-window path).
-3. **Full display + crop to target window** (Recordly-style fallback).
+3. **Full display + crop to target window** (fallback).
 
 Check (a) saved-video watermark, (b) occluding/overlapping windows, (c) moving/resizing the target, (d) multiple monitors and display scaling, (e) minimized windows, (f) focus changes, (g) system and app UI overlays, and (h) audio synchronization.
 

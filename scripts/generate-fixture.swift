@@ -4,17 +4,25 @@ import AppKit
 @main struct Fixture {
  static func main() async throws {
   let root=URL(fileURLWithPath:CommandLine.arguments[1]);try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+  let roundedWindow = CommandLine.arguments.contains("--rounded-window")
+  let width = roundedWindow ? 320 : CommandLine.arguments.contains("--large-frame") ? 1920 : 640
+  let height = roundedWindow ? 200 : CommandLine.arguments.contains("--large-frame") ? 1200 : 400
   let video=root.appendingPathComponent("fixture-video.mov")
   let writer=try AVAssetWriter(outputURL:video,fileType:.mov)
-  let input=AVAssetWriterInput(mediaType:.video,outputSettings:[AVVideoCodecKey:AVVideoCodecType.h264,AVVideoWidthKey:640,AVVideoHeightKey:400])
-  let adaptor=AVAssetWriterInputPixelBufferAdaptor(assetWriterInput:input,sourcePixelBufferAttributes:[kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_32ARGB,kCVPixelBufferWidthKey as String:640,kCVPixelBufferHeightKey as String:400])
+  let input=AVAssetWriterInput(mediaType:.video,outputSettings:[AVVideoCodecKey:AVVideoCodecType.h264,AVVideoWidthKey:width,AVVideoHeightKey:height])
+  let adaptor=AVAssetWriterInputPixelBufferAdaptor(assetWriterInput:input,sourcePixelBufferAttributes:[kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_32ARGB,kCVPixelBufferWidthKey as String:width,kCVPixelBufferHeightKey as String:height])
   writer.add(input);guard writer.startWriting() else {throw writer.error!};writer.startSession(atSourceTime:.zero)
   let blankTail = CommandLine.arguments.contains("--blank-tail")
   let videoEnd = CMTime(value: blankTail ? 2100 : 2015, timescale: 1000)
   for frame in 0..<(blankTail ? 63 : 61) {
    while !input.isReadyForMoreMediaData {try await Task.sleep(nanoseconds:1_000_000)}
    var buffer:CVPixelBuffer?;CVPixelBufferPoolCreatePixelBuffer(nil,adaptor.pixelBufferPool!,&buffer);let pixel=buffer!;CVPixelBufferLockBaseAddress(pixel,[])
-   let ctx=CGContext(data:CVPixelBufferGetBaseAddress(pixel),width:640,height:400,bitsPerComponent:8,bytesPerRow:CVPixelBufferGetBytesPerRow(pixel),space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.noneSkipFirst.rawValue)!
+   let ctx=CGContext(data:CVPixelBufferGetBaseAddress(pixel),width:width,height:height,bitsPerComponent:8,bytesPerRow:CVPixelBufferGetBytesPerRow(pixel),space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.noneSkipFirst.rawValue)!
+   if roundedWindow {
+    ctx.setFillColor(CGColor(gray:0,alpha:1));ctx.fill(CGRect(x:0,y:0,width:width,height:height))
+    ctx.addPath(CGPath(roundedRect:CGRect(x:0,y:0,width:width,height:height),cornerWidth:24,cornerHeight:24,transform:nil));ctx.clip()
+   }
+   ctx.scaleBy(x:CGFloat(width)/640,y:CGFloat(height)/400)
    ctx.setFillColor(CGColor(red:0.96,green:0.96,blue:0.94,alpha:1));ctx.fill(CGRect(x:0,y:0,width:640,height:400))
    ctx.setFillColor(CGColor(red:0.2,green:0.35,blue:0.3,alpha:1));ctx.fill(CGRect(x:0,y:355,width:640,height:45));ctx.fill(CGRect(x:30+frame*4,y:80,width:120,height:180))
    // A tooltip-like marker appears exactly at 1s for export timing checks.

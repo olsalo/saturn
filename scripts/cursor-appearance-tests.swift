@@ -10,9 +10,9 @@ import AppKit
         assert(arrow.identifier != text.identifier && text.identifier != hand.identifier)
         assert(arrow.cgImage != nil && text.cgImage != nil && hand.cgImage != nil)
         let rect = cursorSpriteRect(asset: arrow, pixelScaleX: 2, pixelScaleY: 2)
-        assert(abs(rect.width - arrow.width * 3.5) < 0.001, "Retina cursor must be exactly 1.75 times native size")
-        assert(abs(rect.minX + arrow.hotspotX * 3.5) < 0.001)
-        assert(abs(rect.maxY - arrow.hotspotY * 3.5) < 0.001, "Image changes must keep the click hotspot fixed")
+        assert(abs(rect.width - arrow.width * 4.0) < 0.001, "Retina cursor must be exactly 2 times native size")
+        assert(abs(rect.minX + arrow.hotspotX * 4.0) < 0.001)
+        assert(abs(rect.maxY - arrow.hotspotY * 4.0) < 0.001, "Image changes must keep the click hotspot fixed")
         let events: [[String: Any]] = [
             ["tUs":0,"x":20.0,"y":20.0,"visible":true,"cursorID":"arrow","cursorScaleX":2.0,"cursorScaleY":2.0],
             ["tUs":1_000_000,"x":20.0,"y":20.0,"visible":true,"cursorID":"text","cursorScaleX":2.0,"cursorScaleY":2.0],
@@ -27,6 +27,6 @@ import AppKit
         if CommandLine.arguments.count > 1 {
             try JSONEncoder().encode(["arrow":arrow,"text":text,"hand":hand]).write(to: URL(fileURLWithPath:CommandLine.arguments[1]))
         }
-        print("Native cursors passed: arrow/text/hand bitmaps, portable assets, 1.75x Retina size, fixed hotspots, and timestamped shape changes.")
+        print("Native cursors passed: arrow/text/hand bitmaps, portable assets, 2x Retina size, fixed hotspots, and timestamped shape changes.")
     }
 }

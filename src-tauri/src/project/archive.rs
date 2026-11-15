@@ -1,9 +1,11 @@
 use super::manifest::{Background, Manifest};
+use chrono::{Datelike, TimeZone, Timelike};
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
     path::Path,
+    time::SystemTime,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 type Result<T> = std::result::Result<T, String>;
@@ -18,7 +20,68 @@ const ALLOWED: &[&str] = &[
     "assets/background.jpg",
     "assets/background.png",
     "preview/thumbnail.jpg",
+    "preview/thumbnail.png",
 ];
+fn allowed(name: &str) -> bool {
+    if ALLOWED.contains(&name) {
+        return true;
+    }
+    let parts: Vec<_> = name.split('/').collect();
+    parts.len() == 4
+        && parts[0] == "clips"
+        && super::manifest::valid_clip_id(parts[1])
+        && [
+            "media/source.mov",
+            "media/source.mp4",
+            "media/system.m4a",
+            "media/microphone.m4a",
+            "cursor/events.jsonl",
+            "cursor/assets.json",
+        ]
+        .contains(&format!("{}/{}", parts[2], parts[3]).as_str())
+}
+pub fn thumbnail_path(work: &Path) -> Option<&'static str> {
+    ["preview/thumbnail.jpg", "preview/thumbnail.png"]
+        .into_iter()
+        .find(|path| work.join(path).is_file())
+}
+fn zip_modified_time(time: SystemTime) -> zip::DateTime {
+    let date: chrono::DateTime<chrono::Local> = time.into();
+    zip::DateTime::from_date_and_time(
+        date.year() as u16,
+        date.month() as u8,
+        date.day() as u8,
+        date.hour() as u8,
+        date.minute() as u8,
+        date.second() as u8,
+    )
+    .unwrap_or_default()
+}
+fn extracted_modified_time(date: Option<zip::DateTime>, created_at: &str) -> Result<SystemTime> {
+    // Older Saturn archives used ZIP's 1980 default for every entry. Their true
+    // per-file times were lost; use the known recording date for those entries.
+    if let Some(date) = date.filter(|date| *date != zip::DateTime::default()) {
+        if let Some(time) = chrono::Local
+            .with_ymd_and_hms(
+                date.year() as i32,
+                date.month() as u32,
+                date.day() as u32,
+                date.hour() as u32,
+                date.minute() as u32,
+                date.second() as u32,
+            )
+            .earliest()
+        {
+            return Ok(time.into());
+        }
+    }
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(SystemTime::from)
+        .map_err(err)
+}
+fn cursor_assets(cursor: &super::manifest::Cursor) -> String {
+    format!("{}/assets.json", cursor.path.rsplit_once('/').unwrap().0)
+}
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -35,12 +98,25 @@ pub fn save(work: &Path, destination: &Path, m: &Manifest) -> Result<()> {
     if !parent.is_dir() {
         return Err("The project folder moved or was removed. Choose Save As.".into());
     }
-    let mut needed = 65_536u64;
-    for entry in ALLOWED.iter().filter(|p| **p != "manifest.json") {
-        if let Ok(meta) = fs::metadata(work.join(entry)) {
-            needed = needed.saturating_add(meta.len());
+    let mut entries = m.source_entries();
+    for (_, cursor) in m.sources() {
+        let path = cursor_assets(cursor);
+        if work.join(&path).is_file() {
+            validate_cursor_assets(&work.join(&path))?;
+            entries.push(path);
         }
     }
+    if let Background::EmbeddedImage { path, .. } = &m.appearance.background {
+        entries.push(path.clone());
+    }
+    if let Some(path) = thumbnail_path(work) {
+        entries.push(path.into());
+    }
+    let needed = entries.iter().try_fold(65_536u64, |sum, path| {
+        fs::metadata(work.join(path))
+            .map(|m| sum.saturating_add(m.len()))
+            .map_err(err)
+    })?;
     super::disk::ensure_space(parent, needed)?;
     let temp = parent.join(format!(".saturn-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
@@ -53,29 +129,19 @@ pub fn save(work: &Path, destination: &Path, m: &Manifest) -> Result<()> {
         let opts = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .large_file(true)
-            .unix_permissions(0o600);
+            .unix_permissions(0o600)
+            .last_modified_time(zip_modified_time(SystemTime::now()));
         zip.start_file("manifest.json", opts).map_err(err)?;
         zip.write_all(&serde_json::to_vec_pretty(m).map_err(err)?)
             .map_err(err)?;
-        let mut entries = vec![m.media.path.clone(), m.cursor.path.clone()];
-        if let Some(audio) = &m.media.separate_audio {
-            for track in [&audio.system, &audio.microphone].into_iter().flatten() {
-                entries.push(track.path.clone());
-            }
-        }
-        if work.join("cursor/assets.json").is_file() {
-            validate_cursor_assets(&work.join("cursor/assets.json"))?;
-            entries.push("cursor/assets.json".into());
-        }
-        if let Background::EmbeddedImage { path, .. } = &m.appearance.background {
-            entries.push(path.clone())
-        }
-        if work.join("preview/thumbnail.jpg").is_file() {
-            entries.push("preview/thumbnail.jpg".into())
-        }
         for entry in entries {
             let mut source = File::open(work.join(&entry)).map_err(err)?;
-            zip.start_file(entry, opts).map_err(err)?;
+            let modified = source
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .map_err(err)?;
+            zip.start_file(entry, opts.last_modified_time(zip_modified_time(modified)))
+                .map_err(err)?;
             io::copy(&mut source, &mut zip).map_err(err)?;
         }
         let out = zip.finish().map_err(err)?;
@@ -92,7 +158,7 @@ pub fn save(work: &Path, destination: &Path, m: &Manifest) -> Result<()> {
 pub fn open(path: &Path, work: &Path) -> Result<Manifest> {
     let file = File::open(path).map_err(err)?;
     let mut zip = ZipArchive::new(file).map_err(err)?;
-    if zip.len() > ALLOWED.len() {
+    if zip.len() > 6010 {
         return Err("Too many project entries".into());
     }
     let mut names = HashSet::new();
@@ -100,7 +166,7 @@ pub fn open(path: &Path, work: &Path) -> Result<Manifest> {
     for i in 0..zip.len() {
         let e = zip.by_index(i).map_err(err)?;
         let name = e.name();
-        if !ALLOWED.contains(&name)
+        if !allowed(name)
             || !names.insert(name.to_owned())
             || e.is_dir()
             || e.enclosed_name().is_none()
@@ -109,14 +175,16 @@ pub fn open(path: &Path, work: &Path) -> Result<Manifest> {
         {
             return Err("Unsafe or unsupported project archive entry".into());
         }
-        let max = if name.starts_with("media/") {
+        let max = if name.starts_with("media/") || name.contains("/media/") {
             64 * 1024 * 1024 * 1024
-        } else if name == "cursor/assets.json" {
+        } else if name.ends_with("cursor/assets.json") {
             16 * 1024 * 1024
-        } else if name.starts_with("cursor/") {
+        } else if name.starts_with("cursor/") || name.contains("/cursor/") {
             512 * 1024 * 1024
+        } else if ["preview/thumbnail.png", "preview/thumbnail.jpg"].contains(&name) {
+            256 * 1024 * 1024
         } else if name == "manifest.json" {
-            64 * 1024
+            2 * 1024 * 1024
         } else {
             32 * 1024 * 1024
         };
@@ -137,16 +205,9 @@ pub fn open(path: &Path, work: &Path) -> Result<Manifest> {
         serde_json::from_str(&text).map_err(err)?
     };
     m.validate()?;
-    for needed in [&m.media.path, &m.cursor.path] {
-        if !names.contains(needed) {
+    for needed in m.source_entries() {
+        if !names.contains(&needed) {
             return Err(format!("Missing {needed}"));
-        }
-    }
-    if let Some(audio) = &m.media.separate_audio {
-        for track in [&audio.system, &audio.microphone].into_iter().flatten() {
-            if !names.contains(&track.path) {
-                return Err(format!("Missing {}", track.path));
-            }
         }
     }
     if let Background::EmbeddedImage { path, .. } = &m.appearance.background {
@@ -167,6 +228,7 @@ pub fn open(path: &Path, work: &Path) -> Result<Manifest> {
     let result = (|| {
         for i in 0..zip.len() {
             let mut e = zip.by_index(i).map_err(err)?;
+            let modified = extracted_modified_time(e.last_modified(), &m.created_at)?;
             let output = work.join(e.name());
             fs::create_dir_all(output.parent().unwrap()).map_err(err)?;
             let mut out = OpenOptions::new()
@@ -175,11 +237,16 @@ pub fn open(path: &Path, work: &Path) -> Result<Manifest> {
                 .open(output)
                 .map_err(err)?;
             io::copy(&mut e, &mut out).map_err(err)?;
+            out.set_times(fs::FileTimes::new().set_modified(modified))
+                .map_err(err)?;
             out.sync_all().map_err(err)?;
         }
-        validate_cursor(&work.join(&m.cursor.path), m.media.duration_us)?;
-        if names.contains("cursor/assets.json") {
-            validate_cursor_assets(&work.join("cursor/assets.json"))?;
+        for (media, cursor) in m.sources() {
+            validate_cursor(&work.join(&cursor.path), media.duration_us)?;
+            let assets = cursor_assets(cursor);
+            if names.contains(&assets) {
+                validate_cursor_assets(&work.join(assets))?;
+            }
         }
         Ok(m)
     })();
@@ -502,5 +569,210 @@ mod tests {
         );
         println!("{gib} GiB ZIP64: save {save_elapsed:?}, reopen+CRC {open_elapsed:?}");
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+    use crate::project::manifest::{Clip, SequenceClip};
+    fn clip(id: &str) -> Clip {
+        let base = Manifest::new(1_000_000, 640, 400, false, false);
+        let mut clip = Clip {
+            id: id.into(),
+            media: base.media,
+            cursor: base.cursor,
+        };
+        clip.media.path = format!("clips/{id}/media/source.mov");
+        clip.cursor.path = format!("clips/{id}/cursor/events.jsonl");
+        clip.media.separate_audio = Some(crate::project::manifest::SeparateAudio {
+            system: Some(crate::project::manifest::AudioTrack {
+                path: format!("clips/{id}/media/system.m4a"),
+                offset_us: -50_000,
+            }),
+            microphone: None,
+        });
+        clip
+    }
+    #[test]
+    fn clips_roundtrip_in_sequence_order_without_flattening() {
+        let root = std::env::temp_dir().join(format!("saturn-clips-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        let mut m = Manifest::new(1, 640, 400, false, false);
+        m.set_clips(vec![clip("0001"), clip("0002")]).unwrap();
+        m.sequence.reverse();
+        for clip in &m.clips {
+            fs::create_dir_all(work.join(&clip.media.path).parent().unwrap()).unwrap();
+            fs::create_dir_all(work.join(&clip.cursor.path).parent().unwrap()).unwrap();
+            fs::write(work.join(&clip.media.path), clip.id.as_bytes()).unwrap();
+            fs::write(
+                work.join(
+                    &clip
+                        .media
+                        .separate_audio
+                        .as_ref()
+                        .unwrap()
+                        .system
+                        .as_ref()
+                        .unwrap()
+                        .path,
+                ),
+                b"audio",
+            )
+            .unwrap();
+            fs::write(work.join(&clip.cursor.path), b"").unwrap();
+        }
+        let dest = root.join("clips.saturn");
+        save(&work, &dest, &m).unwrap();
+        let reopened = open(&dest, &root.join("opened")).unwrap();
+        assert_eq!(reopened.media.duration_us, 2_000_000);
+        assert_eq!(reopened.sequence[0].clip_id, "0002");
+        assert_eq!(
+            reopened.clips[1]
+                .media
+                .separate_audio
+                .as_ref()
+                .unwrap()
+                .system
+                .as_ref()
+                .unwrap()
+                .offset_us,
+            -50_000
+        );
+        assert_eq!(
+            fs::read(root.join("opened/clips/0002/media/system.m4a")).unwrap(),
+            b"audio"
+        );
+        assert_eq!(
+            fs::read(root.join("opened/clips/0001/media/source.mov")).unwrap(),
+            b"0001"
+        );
+        assert!(!root.join("opened/media/source.mov").exists());
+        // A missing later source must reject the entire project.
+        fs::remove_file(work.join(&m.clips[1].media.path)).unwrap();
+        assert!(save(&work, &dest, &m).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn rejects_unsafe_clip_paths_and_invalid_sequences() {
+        let mut m = Manifest::new(1, 640, 400, false, false);
+        m.set_clips(vec![clip("0001"), clip("0002")]).unwrap();
+        let mut bad = m.clone();
+        bad.clips[1].media.path = "clips/0002/../../secret".into();
+        assert!(bad.validate().is_err());
+        let mut bad = m.clone();
+        bad.sequence[1] = SequenceClip {
+            clip_id: "0001".into(),
+        };
+        assert!(bad.validate().is_err());
+        let mut bad = m.clone();
+        bad.clips[1].id = "0001".into();
+        assert!(bad.validate().is_err());
+        let mut bad = m.clone();
+        bad.media.duration_us += 1;
+        assert!(bad.validate().is_err());
+        for path in [
+            "clips/../media/source.mov",
+            "clips/0001/media/secret",
+            "clips/0001/../manifest.json",
+            "clips/0000/media/source.mov",
+        ] {
+            assert!(!allowed(path));
+        }
+    }
+}
+
+#[cfg(test)]
+mod thumbnail_tests {
+    use super::*;
+    #[test]
+    fn jpeg_thumbnail_survives_save_and_takes_precedence_over_png() {
+        let root = std::env::temp_dir().join(format!("saturn-thumbnail-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        for name in ["media", "cursor", "preview"] {
+            fs::create_dir_all(work.join(name)).unwrap();
+        }
+        fs::write(work.join("media/source.mov"), b"source").unwrap();
+        fs::write(work.join("cursor/events.jsonl"), b"").unwrap();
+        fs::write(work.join("preview/thumbnail.png"), b"previous png").unwrap();
+        assert_eq!(thumbnail_path(&work), Some("preview/thumbnail.png"));
+        fs::write(work.join("preview/thumbnail.jpg"), b"full resolution jpeg").unwrap();
+        assert_eq!(thumbnail_path(&work), Some("preview/thumbnail.jpg"));
+        let manifest = Manifest::new(1_000_000, 1920, 1200, false, false);
+        let destination = root.join("project.saturn");
+        save(&work, &destination, &manifest).unwrap();
+        let opened = root.join("opened");
+        open(&destination, &opened).unwrap();
+        assert_eq!(
+            fs::read(opened.join("preview/thumbnail.jpg")).unwrap(),
+            b"full resolution jpeg"
+        );
+        assert!(!opened.join("preview/thumbnail.png").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+    #[test]
+    fn file_dates_survive_save_open_and_resave() {
+        let root = std::env::temp_dir().join(format!("saturn-dates-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        for name in ["media", "cursor"] {
+            fs::create_dir_all(work.join(name)).unwrap();
+        }
+        fs::write(work.join("media/source.mov"), b"video").unwrap();
+        fs::write(work.join("cursor/events.jsonl"), b"").unwrap();
+        let modified: SystemTime =
+            chrono::DateTime::parse_from_rfc3339("2026-11-10T11:22:24+02:00")
+                .unwrap()
+                .into();
+        File::options()
+            .write(true)
+            .open(work.join("media/source.mov"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let manifest = Manifest::new(1_000_000, 640, 400, false, false);
+        let path = root.join("first.saturn");
+        save(&work, &path, &manifest).unwrap();
+        let mut archive = ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        assert_eq!(
+            archive.by_name("media/source.mov").unwrap().last_modified(),
+            Some(zip_modified_time(modified))
+        );
+        assert_ne!(
+            archive.by_name("manifest.json").unwrap().last_modified(),
+            Some(zip::DateTime::default())
+        );
+        drop(archive);
+        let opened = root.join("opened");
+        let manifest = open(&path, &opened).unwrap();
+        let restored = fs::metadata(opened.join("media/source.mov"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(restored, modified);
+        let second = root.join("second.saturn");
+        save(&opened, &second, &manifest).unwrap();
+        let mut archive = ZipArchive::new(File::open(&second).unwrap()).unwrap();
+        assert_eq!(
+            archive.by_name("media/source.mov").unwrap().last_modified(),
+            Some(zip_modified_time(modified))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn legacy_1980_dates_use_the_recording_date() {
+        let created = "2026-11-10T11:22:24+02:00";
+        let expected: SystemTime = chrono::DateTime::parse_from_rfc3339(created)
+            .unwrap()
+            .into();
+        assert_eq!(
+            extracted_modified_time(Some(zip::DateTime::default()), created).unwrap(),
+            expected
+        );
+        assert_eq!(extracted_modified_time(None, created).unwrap(), expected);
     }
 }

@@ -3,6 +3,12 @@ import AVFoundation
 
 @main struct FFmpegEncoderTests {
     static func main() async throws {
+        precondition(ExportEncoder(rawValue: "ffmpeg") == nil)
+        precondition(ExportEncoder(rawValue: "hevc") == nil)
+        precondition(ExportEncoder.defaultEncoder == .h264)
+        let defaults = ffmpegArguments(input: URL(fileURLWithPath: "/input.mov"),
+                                       output: URL(fileURLWithPath: "/output.mp4"), duration: 2)
+        precondition(defaults.contains("h264_videotoolbox") && defaults.contains("avc1"))
         let folder = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("saturn-ffmpeg-tests-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -35,7 +41,7 @@ import AVFoundation
             try await encodeVideo(input: input, output: output, cancel: cancel) { _ in }
             fatalError("FFmpeg overwrote an existing export")
         } catch {
-            precondition(error.localizedDescription.contains("FFmpeg HEVC encoding failed"), error.localizedDescription)
+            precondition(error.localizedDescription.contains("FFmpeg H.264 encoding failed"), error.localizedDescription)
             let retained = try Data(contentsOf: output)
             precondition(retained == sentinel)
         }
@@ -44,7 +50,7 @@ import AVFoundation
                                   output: folder.appendingPathComponent("failed.mp4"), cancel: cancel) { _ in }
             fatalError("FFmpeg accepted a missing source")
         } catch {
-            precondition(error.localizedDescription.contains("FFmpeg HEVC encoding failed"), error.localizedDescription)
+            precondition(error.localizedDescription.contains("FFmpeg H.264 encoding failed"), error.localizedDescription)
         }
         try Data().write(to: cancel)
         do {

@@ -19,7 +19,11 @@ func exportVideo(_ request: [String: Any]) async throws {
         encoder = .defaultEncoder
     }
     try validateExportEncoder(encoder)
-    let manifest = try json(work + "/manifest.json")
+    let manifest = try (request["manifest"] as? [String: Any]) ?? json(work + "/manifest.json")
+    if request["manifest"] == nil, let clips = manifest["clips"] as? [[String: Any]], !clips.isEmpty {
+        try await exportSequence(request, manifest: manifest, clips: clips, encoder: encoder)
+        return
+    }
     let media = manifest["media"] as! [String: Any]
     let appearance = manifest["appearance"] as! [String: Any]
     let background = appearance["background"] as! [String: Any]
@@ -85,14 +89,24 @@ func exportVideo(_ request: [String: Any]) async throws {
     let preset = background["preset"] as? String ?? "dawn"
     let colors = preset == "dusk" ? ["6667ac","b894ba","edbdac"] : preset == "mint" ? ["224c4b","6a9f8c","d1dfb2"] : preset == "ink" ? ["1a1d24","424b5a","777d87"] : ["a2b5ee","d6bfde","f4c6ac"]
     bg.colors = colors.map { color($0) }; bg.startPoint = CGPoint(x: 0, y: 1); bg.endPoint = CGPoint(x: 1, y: 0)
-    if !none { parent.addSublayer(bg) }
+    if background["type"] as? String == "solid" {
+        parent.backgroundColor = color(background["color"] as? String == "black" ? "000000" : "ffffff")
+    } else if !none { parent.addSublayer(bg) }
     if background["type"] as? String == "embeddedImage", let path = background["path"] as? String, let image = NSImage(contentsOfFile: work + "/" + path) {
         let imageLayer = CALayer(); imageLayer.frame = parent.bounds; imageLayer.contents = image.cgImage(forProposedRect: nil, context: nil, hints: nil); imageLayer.contentsGravity = .resizeAspectFill; imageLayer.masksToBounds = true; parent.addSublayer(imageLayer)
     }
-    let radius = none ? 0 : exportCornerRadius(CGFloat(appearance["cornerRadiusPx"] as! Int), canvasWidth: size.width)
+    var radius = none ? 0 : exportCornerRadius(CGFloat(appearance["cornerRadiusPx"] as! Int), canvasWidth: size.width)
+    if !none && media["captureKind"] as? String != "display" {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let image = try await generator.image(at: videoRange.start).image
+        radius = max(radius, recordedCornerRadius(image) * videoRect.width / CGFloat(image.width))
+    }
     let maskRect = none ? videoRect : exportVideoMaskRect(videoRect)
     if appearance["shadow"] as? Bool == true && !none {
-        // Recordly's layered shadow profile at 20% intensity.
+        // Layered shadow profile at 20% intensity.
         for (offset, blur, opacity) in [(2.4, 9.6, 0.14), (0.8, 3.2, 0.10), (0.4, 1.6, 0.06)] {
             let shadow = CALayer(); shadow.frame = maskRect
             shadow.shadowPath = CGPath(roundedRect: shadow.bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
@@ -103,13 +117,13 @@ func exportVideo(_ request: [String: Any]) async throws {
     let video = CALayer(); video.frame = parent.bounds
     let mask = CAShapeLayer(); mask.path = CGPath(roundedRect: maskRect, cornerWidth: radius, cornerHeight: radius, transform: nil); video.mask = mask
     parent.addSublayer(video)
-    if let data = try? String(contentsOfFile: work + "/cursor/events.jsonl", encoding: .utf8) {
+    if let data = try? String(contentsOfFile: work + "/" + ((manifest["cursor"] as? [String: Any])?["path"] as? String ?? "cursor/events.jsonl"), encoding: .utf8) {
         let events = data.split(separator: "\n").compactMap { line -> [String: Any]? in
             guard let bytes = String(line).data(using: .utf8) else { return nil }
             return (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any]
         }
         let cursor = CALayer()
-        var assets = (try? Data(contentsOf: URL(fileURLWithPath: work + "/cursor/assets.json"))).flatMap { try? JSONDecoder().decode([String: CursorAsset].self, from: $0) } ?? [:]
+        var assets = (try? Data(contentsOf: URL(fileURLWithPath: work + "/" + ((((manifest["cursor"] as? [String: Any])?["path"] as? String ?? "cursor/events.jsonl") as NSString).deletingLastPathComponent) + "/assets.json"))).flatMap { try? JSONDecoder().decode([String: CursorAsset].self, from: $0) } ?? [:]
         if let arrow = await CursorAsset.system(.arrow) { assets["arrow"] = arrow }
         let positions = CAKeyframeAnimation(keyPath: "position")
         let visibility = CAKeyframeAnimation(keyPath: "opacity")
@@ -183,8 +197,9 @@ func exportVideo(_ request: [String: Any]) async throws {
         }
     }
     videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: video, in: parent)
-    let intermediate = URL(fileURLWithPath: work).appendingPathComponent("render-" + UUID().uuidString + ".mov")
-    defer { try? FileManager.default.removeItem(at: intermediate) }
+    let renderOnly = request["renderOnly"] as? Bool ?? false
+    let intermediate = renderOnly ? URL(fileURLWithPath: output) : URL(fileURLWithPath: work).appendingPathComponent("render-" + UUID().uuidString + ".mov")
+    defer { if !renderOnly { try? FileManager.default.removeItem(at: intermediate) } }
     guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleProRes422LPCM) else { throw failure("Compositor encoder unavailable") }
     exporter.timeRange = CMTimeRange(start: .zero, duration: duration)
     let audioTracks = composition.tracks(withMediaType: .audio)
@@ -201,6 +216,7 @@ func exportVideo(_ request: [String: Any]) async throws {
         try await Task.sleep(nanoseconds: 200_000_000)
     }
     guard exporter.status == .completed else { throw exporter.error ?? failure("Export cancelled") }
+    if renderOnly { return }
     // Core Animation/compositor output can itself have an empty terminal frame.
     // Bound the final encode to real rendered pictures as well as source data.
     let master = AVURLAsset(url: intermediate)
@@ -221,3 +237,71 @@ func exportVideo(_ request: [String: Any]) async throws {
     emit(["type":"finished"])
 }
 
+
+/// Render each source independently so cursor smoothing, click animation and
+/// audio offsets cannot bleed across a cut. Join losslessly, then encode once.
+func exportSequence(_ request: [String: Any], manifest: [String: Any], clips: [[String: Any]], encoder: ExportEncoder) async throws {
+    guard let work = request["workspace"] as? String, let output = request["output"] as? String,
+          let sequence = manifest["sequence"] as? [[String: Any]], !sequence.isEmpty else { throw failure("Missing clip sequence") }
+    let root = URL(fileURLWithPath: work)
+    let cancel = root.appendingPathComponent("cancel-export")
+    let report = NativeOutput.reporter ?? printNative
+    var temporary: [URL] = []
+    defer { for file in temporary { try? FileManager.default.removeItem(at: file) } }
+    let composition = AVMutableComposition()
+    guard let video = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else { throw failure("Could not prepare sequence") }
+    var position = CMTime.zero
+    var audioTracks: [AVMutableCompositionTrack] = []
+    for (index, entry) in sequence.enumerated() {
+        if FileManager.default.fileExists(atPath: cancel.path) { throw failure("Export cancelled") }
+        guard let id = entry["clipId"] as? String, let clip = clips.first(where: { $0["id"] as? String == id }) else { throw failure("Missing sequence clip") }
+        var single = manifest
+        single.removeValue(forKey: "clips"); single.removeValue(forKey: "sequence")
+        single["media"] = clip["media"]; single["cursor"] = clip["cursor"]
+        let master = root.appendingPathComponent("render-" + UUID().uuidString + ".mov")
+        temporary.append(master)
+        var child = request
+        child["manifest"] = single; child["output"] = master.path; child["renderOnly"] = true
+        try await NativeOutput.$reporter.withValue({ event in
+            if let fraction = event["fraction"] as? Double {
+                report(["type":"progress", "fraction":(Double(index) + fraction / 0.4) / Double(sequence.count) * 0.4])
+            }
+        }) { try await exportVideo(child) }
+        let asset = AVURLAsset(url: master)
+        guard let source = try await asset.loadTracks(withMediaType: .video).first else { throw failure("Rendered clip is missing") }
+        let range = try await exportVideoTimeRange(asset: asset, track: source)
+        try video.insertTimeRange(range, of: source, at: position)
+        for (audioIndex, audio) in try await asset.loadTracks(withMediaType: .audio).enumerated() {
+            let overlap = CMTimeRangeGetIntersection(try await audio.load(.timeRange), otherRange: range)
+            if overlap.isValid && overlap.duration > .zero {
+                while audioTracks.count <= audioIndex {
+                    guard let dest = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { throw failure("Could not prepare sequence audio") }
+                    audioTracks.append(dest)
+                }
+                try audioTracks[audioIndex].insertTimeRange(overlap, of: audio, at: CMTimeAdd(position, CMTimeSubtract(overlap.start, range.start)))
+            }
+        }
+        position = CMTimeAdd(position, range.duration)
+    }
+    let joined = root.appendingPathComponent("render-" + UUID().uuidString + ".mov")
+    temporary.append(joined)
+    guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else { throw failure("Could not join clips") }
+    exporter.outputURL = joined; exporter.outputFileType = .mov
+    exporter.timeRange = CMTimeRange(start: .zero, duration: position)
+    exporter.exportAsynchronously { }
+    while [.waiting, .exporting, .unknown].contains(exporter.status) {
+        if FileManager.default.fileExists(atPath: cancel.path) { exporter.cancelExport() }
+        try await Task.sleep(nanoseconds: 100_000_000)
+    }
+    guard exporter.status == .completed else { throw exporter.error ?? failure("Export cancelled") }
+    if encoder == .web {
+        try await encodeWebsite(input: joined, folder: URL(fileURLWithPath: output), cancel: cancel, duration: position.seconds, report: report)
+    } else {
+        try await encodeVideo(input: joined, output: URL(fileURLWithPath: output), cancel: cancel, duration: position.seconds, encoder: encoder, report: report)
+        try await alignExportAudioToVideo(url: URL(fileURLWithPath: output), cancel: cancel)
+        let check = AVURLAsset(url: URL(fileURLWithPath: output))
+        guard try await check.load(.duration).seconds > 0 else { throw failure("Export validation failed") }
+        try await validateVideoEnding(asset: check)
+    }
+    emit(["type":"finished"])
+}

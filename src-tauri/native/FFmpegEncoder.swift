@@ -20,14 +20,6 @@ func ffmpegTool(_ name: String) throws -> URL {
     return url
 }
 
-private let ffmpegVideoOptions = [
-    "-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-pix_fmt", "p010le",
-    "-q:v", "57", "-allow_sw", "0", "-realtime", "0", "-prio_speed", "0",
-    // Use a ~10-second GOP at the 30fps export ceiling and allow
-    // frame reordering. FFmpeg's 12-frame default inflates static UI recordings.
-    "-g", "301", "-bf", "2",
-]
-
 private func ffmpegVideoOptions(for encoder: ExportEncoder) -> [String] {
     switch encoder {
     case .av1:
@@ -48,12 +40,12 @@ private func ffmpegVideoOptions(for encoder: ExportEncoder) -> [String] {
         // FFmpeg's VideoToolbox constant-quality mode requires Apple Silicon.
         return options + ["-b:v", "8M"]
 #endif
-    default:
-        return ffmpegVideoOptions
+    case .web:
+        preconditionFailure("Website export encodes AV1 and VP9 separately")
     }
 }
 
-func ffmpegArguments(input: URL, output: URL, duration: Double?, encoder: ExportEncoder = .ffmpeg) -> [String] {
+func ffmpegArguments(input: URL, output: URL, duration: Double?, encoder: ExportEncoder = .defaultEncoder) -> [String] {
     let web = encoder == .av1 || encoder == .vp9
     var args = ["-hide_banner", "-nostdin", "-loglevel", "error", "-nostats", "-n",
                 "-progress", "pipe:1", "-i", input.path,
@@ -64,7 +56,7 @@ func ffmpegArguments(input: URL, output: URL, duration: Double?, encoder: Export
                  "-f", "webm", "-cues_to_front", "1"]
     } else {
         // Constrained VBR retains the 128k target without padding silence.
-        args += ["-tag:v", encoder == .h264 ? "avc1" : "hvc1", "-c:a", "aac_at",
+        args += ["-tag:v", "avc1", "-c:a", "aac_at",
                  "-aac_at_mode", "cvbr", "-b:a", "128k", "-ac", "2", "-movflags", "+faststart"]
     }
     if let duration {
@@ -73,7 +65,7 @@ func ffmpegArguments(input: URL, output: URL, duration: Double?, encoder: Export
     return args + [output.path]
 }
 
-func validateFFmpegEncoder(_ encoder: ExportEncoder = .ffmpeg) throws {
+func validateFFmpegEncoder(_ encoder: ExportEncoder = .defaultEncoder) throws {
     // Exercise the actual hardware, not just the list of compiled-in encoders.
     // Fail before the expensive ProRes compositor pass on unsupported machines.
     let process = Process()
@@ -120,7 +112,7 @@ private final class FFmpegLog: @unchecked Sendable {
 
 func encodeVideo(input: URL, output: URL, cancel: URL, duration: Double? = nil,
                  encoder: ExportEncoder = .defaultEncoder, report: @escaping ([String: Any]) -> Void) async throws {
-    let label = encoder == .av1 ? "AV1" : encoder == .vp9 ? "VP9" : encoder == .h264 ? "H.264" : "HEVC"
+    let label = encoder == .av1 ? "AV1" : encoder == .vp9 ? "VP9" : "H.264"
     guard encoder != .web else { throw ffmpegError("Website export requires a destination folder") }
     if FileManager.default.fileExists(atPath: cancel.path) { throw ffmpegError("Export cancelled") }
     guard !FileManager.default.fileExists(atPath: output.path) else {
@@ -285,7 +277,7 @@ func encodeWebsite(input: URL, folder: URL, cancel: URL, duration: Double,
     // Cap the long edge for a small, broadly supported loading image.
     let generator = AVAssetImageGenerator(asset: AVURLAsset(url: input))
     generator.appliesPreferredTrackTransform = true
-    generator.maximumSize = CGSize(width: 1280, height: 1280)
+    generator.maximumSize = CGSize(width: posterThumbnailMaxDimension, height: posterThumbnailMaxDimension)
     generator.requestedTimeToleranceBefore = .zero
     generator.requestedTimeToleranceAfter = .zero
     let image = try await generator.image(at: .zero).image
@@ -293,7 +285,7 @@ func encodeWebsite(input: URL, folder: URL, cancel: URL, duration: Double,
     guard let destination = CGImageDestinationCreateWithURL(thumbnail as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
         throw ffmpegError("Could not create website thumbnail")
     }
-    CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
+    CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: posterThumbnailJPEGQuality] as CFDictionary)
     guard CGImageDestinationFinalize(destination) else { throw ffmpegError("Could not save website thumbnail") }
     if FileManager.default.fileExists(atPath: cancel.path) || Task.isCancelled { throw ffmpegError("Export cancelled") }
     let width = sourceVideo["width"] as? Int ?? 2560, height = sourceVideo["height"] as? Int ?? 1600

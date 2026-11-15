@@ -11,11 +11,26 @@ swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library -
 swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library -target "$target-apple-macosx15.0" src-tauri/native/CursorTimeline.swift scripts/cursor-timing-tests.swift -o "$task_dir/cursor-timing"
 "$task_dir/cursor-timing"
 swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library -D SATURN_BRIDGE -target "$target-apple-macosx15.0" src-tauri/native/RecorderNative.swift src-tauri/native/ExportCompositor.swift src-tauri/native/VideoTiming.swift src-tauri/native/ExportEncoder.swift src-tauri/native/FFmpegEncoder.swift src-tauri/native/CursorAppearance.swift src-tauri/native/CursorTimeline.swift src-tauri/native/CaptureGeometry.swift src-tauri/native/CapturePermission.swift scripts/cursor-startup-tests.swift -o "$task_dir/cursor-startup"
+swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library -D SATURN_BRIDGE -target "$target-apple-macosx15.0" src-tauri/native/RecorderNative.swift src-tauri/native/ExportCompositor.swift src-tauri/native/VideoTiming.swift src-tauri/native/ExportEncoder.swift src-tauri/native/FFmpegEncoder.swift src-tauri/native/CursorAppearance.swift src-tauri/native/CursorTimeline.swift src-tauri/native/CaptureGeometry.swift src-tauri/native/CapturePermission.swift scripts/recording-pause-tests.swift -o "$task_dir/recording-pause"
+"$task_dir/recording-pause"
 "$task_dir/cursor-startup"
+swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library -D SATURN_BRIDGE -target "$target-apple-macosx15.0" src-tauri/native/RecorderNative.swift src-tauri/native/ExportCompositor.swift src-tauri/native/VideoTiming.swift src-tauri/native/ExportEncoder.swift src-tauri/native/FFmpegEncoder.swift src-tauri/native/CursorAppearance.swift src-tauri/native/CursorTimeline.swift src-tauri/native/CaptureGeometry.swift src-tauri/native/CapturePermission.swift scripts/recording-video-tests.swift -o "$task_dir/recording-video"
+"$task_dir/recording-video"
 "$task_dir/permissions"
 "$task_dir/geometry"
 "$task_dir/fixture" "$task_dir/media"
 python3 scripts/prepare-smoke.py "$task_dir/media"
+# Saved thumbnails match the website poster’s 1280-pixel long-edge cap.
+"$task_dir/fixture" "$task_dir/large-thumbnail" --large-frame
+"$task_dir/native" inspect "$task_dir/large-thumbnail/source.mov" "$task_dir/large-thumbnail/thumbnail.jpg" > "$task_dir/large-thumbnail/inspection.json"
+swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library scripts/thumbnail-resolution-tests.swift -o "$task_dir/thumbnail-resolution"
+"$task_dir/thumbnail-resolution" "$task_dir/large-thumbnail/thumbnail.jpg"
+"$task_dir/thumbnail-resolution" "$task_dir/large-thumbnail/thumbnail.jpg" --shrink
+"$task_dir/native" ensure-thumbnail "$task_dir/large-thumbnail/source.mov" "$task_dir/large-thumbnail/thumbnail.jpg"
+"$task_dir/thumbnail-resolution" "$task_dir/large-thumbnail/thumbnail.jpg"
+thumbnail_inode=$(stat -f %i "$task_dir/large-thumbnail/thumbnail.jpg")
+"$task_dir/native" ensure-thumbnail "$task_dir/large-thumbnail/source.mov" "$task_dir/large-thumbnail/thumbnail.jpg"
+test "$thumbnail_inode" = "$(stat -f %i "$task_dir/large-thumbnail/thumbnail.jpg")"
 swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library -target "$target-apple-macosx15.0" src-tauri/native/CursorAppearance.swift src-tauri/native/CursorTimeline.swift scripts/cursor-appearance-tests.swift -o "$task_dir/cursor-appearance"
 "$task_dir/cursor-appearance" "$task_dir/media/cursor/assets.json"
 "$task_dir/native" inspect "$task_dir/media/media/source.mov" > "$task_dir/source-inspection.json"
@@ -72,11 +87,10 @@ for path in [pathlib.Path(sys.argv[1])]:
  assert (v['width'],v['height'])==(2560,1600),v
  assert 1.9<v['durationUs']/1e6<2.1,v
  assert v['hasAudio'] and abs(v['fps']-30)<0.01,v
- assert v['codec']==int.from_bytes(b'hvc1','big'),v
- assert v['bitDepth']==10 and v['hevcProfile']==2,v
+ assert v['codec']==int.from_bytes(b'avc1','big'),v
  print(f'{path.name}: export codec, dimensions, duration, frame rate and audio passed.')
 
-print('Native export passed: 2560x1600 16:10, HEVC Main 10, source fps, audio and video cut together.')
+print('Native export passed: 2560x1600 16:10, H.264 High, source fps, audio and video cut together.')
 PY
 python3 - "$task_dir/media/rendered.mp4" <<'PYMP4'
 import pathlib,struct,sys
@@ -125,6 +139,20 @@ PYEDGE
 "$task_dir/native" export "$task_dir/media/edge-request.json"
 swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library -target "$target-apple-macosx15.0" src-tauri/native/CaptureGeometry.swift scripts/verify-edge-render.swift -o "$task_dir/verify-edge-render"
 "$task_dir/verify-edge-render" "$task_dir/media/edge-rendered.mp4"
+# A small window's captured 24px corners grow when the footage is enlarged.
+"$task_dir/fixture" "$task_dir/rounded-window" --rounded-window
+python3 scripts/prepare-smoke.py "$task_dir/rounded-window"
+python3 - "$task_dir/rounded-window" <<'PYCORNERS'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); m=json.loads(p.joinpath('manifest.json').read_text())
+m['media'].update(width=320,height=200,captureKind='window')
+m['appearance'].update(background={'type':'solid','color':'white'},shadow=False,cornerRadiusPx=21)
+m['export'].update(width=1280,height=800)
+p.joinpath('manifest.json').write_text(json.dumps(m))
+p.joinpath('cursor/events.jsonl').write_text('')
+PYCORNERS
+"$task_dir/native" export "$task_dir/rounded-window/request.json"
+"$task_dir/verify-edge-render" "$task_dir/rounded-window/rendered.mp4" --rounded-window
 # Encoded black shutdown samples have storage bytes and decode successfully.
 # They must be removed before the background can disguise the missing picture.
 "$task_dir/fixture" "$task_dir/blank-tail" --blank-tail
@@ -139,6 +167,14 @@ p.write_text(json.dumps(m))
 PYBLANK
 "$task_dir/native" export "$task_dir/blank-tail/request.json"
 "$task_dir/verify-edge-render" "$task_dir/blank-tail/rendered.mp4"
+# Multi-clip sources must export as one continuous video with audio after the cut.
+cp "$task_dir/media/manifest.json" "$task_dir/legacy-manifest.json"
+python3 scripts/prepare-clips-smoke.py "$task_dir/media"
+"$task_dir/native" export "$task_dir/media/clips-request.json"
+python3 scripts/verify-clips-smoke.py "$task_dir/media"
+swiftc -module-cache-path "$task_dir/cache" -swift-version 5 -parse-as-library -target "$target-apple-macosx15.0" scripts/clips-audio-tests.swift -o "$task_dir/clips-audio"
+"$task_dir/clips-audio" "$task_dir/media/clips.mp4"
+cp "$task_dir/legacy-manifest.json" "$task_dir/media/manifest.json"
 # Cancellation must never report a completed render.
 rm "$task_dir/media/rendered.mp4"
 touch "$task_dir/media/cancel-export"

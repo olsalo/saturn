@@ -17,9 +17,9 @@ m = {
     'cursor': {'path': 'cursor/events.jsonl', 'timeUnit': 'microseconds', 'coordinateSpace': 'capturedVideoPixels'},
     'appearance': {'background': {'type': 'embeddedImage', 'path': 'assets/background.jpg', 'preset': 'tahoe-light.jpg'}, 'paddingPx': 64, 'paddingPercent': 38,
                    'cornerRadiusPx': 16, 'shadow': True, 'cursorSmoothing': True, 'clickAnimation': False},
-    'export': {'container': 'mp4', 'codec': 'hevc', 'width': 2560, 'height': 1600, 'frameRate': 30},
+    'export': {'container': 'mp4', 'codec': 'h264', 'width': 2560, 'height': 1600, 'frameRate': 30},
 }
-shutil.copy(pathlib.Path(__file__).resolve().parent.parent / 'public/wallpapers/tahoe-light.jpg', p / 'assets/background.jpg')
+shutil.copy(pathlib.Path(__file__).resolve().parent.parent / 'public/wallpapers/apple/tahoe-light.jpg', p / 'assets/background.jpg')
 (p / 'manifest.json').write_text(json.dumps(m))
 (p / 'cursor/events.jsonl').write_text(''.join(json.dumps({'tUs': i*33333, 'type': 'move',
     'x': 30+i*8, 'y': 150, 'visible': True})+'\n' for i in range(60)))

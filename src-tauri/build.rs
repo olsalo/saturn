@@ -49,6 +49,10 @@ fn main() {
             "In-process native capture bridge failed to compile"
         );
         swift_rs::SwiftLinker::new("15.0").link();
+        // swift-rs adds link-time search paths, but cargo run also needs a
+        // runtime path for @rpath Swift libraries such as libswift_Concurrency.
+        // Match swiftc's native helper without depending on DYLD_LIBRARY_PATH.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
         println!("cargo:rustc-link-search=native={}", out.display());
         println!("cargo:rustc-link-lib=static=SaturnNative");
         for framework in [

@@ -16,6 +16,9 @@ export type Mode =
   | "ready"
   | "starting"
   | "recording"
+  | "pausing"
+  | "paused"
+  | "resuming"
   | "stopping"
   | "finalizing"
   | "export_ready"
@@ -24,6 +27,7 @@ export type Mode =
 export type Background =
   | { type: "none" }
   | { type: "gradient"; preset: "dawn" | "dusk" | "mint" | "ink" }
+  | { type: "solid"; color: "white" | "black" }
   | { type: "embeddedImage"; path: string; preset?: string };
 export type Appearance = {
   background: Background;
@@ -57,6 +61,8 @@ export type Project = {
   includeMicrophoneAudio: boolean;
 };
 export type Snapshot = {
+  recordingsFolderAvailable: boolean;
+  openingProject?: boolean;
   mode: Mode;
   project: Project | null;
   error: string | null;
@@ -68,8 +74,10 @@ export type Snapshot = {
   recoveries: string[];
   saving: boolean;
   startedAtMs?: number | null;
+  recordedDurationMs?: number;
 };
 export const initialSnapshot: Snapshot = {
+  recordingsFolderAvailable: false,
   mode: "idle",
   project: null,
   error: null,

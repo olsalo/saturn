@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { asset } from "@/lib/tauri";
 import type { Background } from "@/lib/contracts";
+import wallpapers from "@/lib/wallpapers.json";
 
 const gradients = {
   dawn: "linear-gradient(135deg,#a2b5ee,#d6bfde 50%,#f4c6ac)",
@@ -13,20 +14,26 @@ export function useBackgroundImage(
   path?: string | null,
   revision?: number | null,
 ) {
+  const presetPath =
+    value.type === "embeddedImage" && value.preset
+      ? wallpapers.find((wallpaper) => wallpaper.id === value.preset)?.path
+      : undefined;
   const url =
     value.type === "embeddedImage"
-      ? value.preset
-        ? `/wallpapers/${encodeURIComponent(value.preset)}`
+      ? presetPath
+        ? `/wallpapers/${presetPath.split("/").map(encodeURIComponent).join("/")}`
         : path
           ? `${asset(path)}?v=${revision ?? 0}`
           : null
       : null;
   const immediate =
-    value.type === "gradient"
-      ? gradients[value.preset]
-      : value.type === "none"
-        ? "#202226"
-        : null;
+    value.type === "solid"
+      ? value.color
+      : value.type === "gradient"
+        ? gradients[value.preset]
+        : value.type === "none"
+          ? "#202226"
+          : null;
   const [loaded, setLoaded] = useState<string | null>(immediate);
   useEffect(() => {
     if (immediate !== null) {

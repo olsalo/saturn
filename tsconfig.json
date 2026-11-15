@@ -10,8 +10,7 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "baseUrl": ".",
-    "paths": { "@/*": ["src/*"], "~/*": ["src/*"], "@coss/ui/lib/*": ["src/lib/*"], "@coss/ui/components/*": ["src/components/ui/*"] },
+    "paths": { "@/*": ["./src/*"], "~/*": ["./src/*"] },
     "types": ["vite/client"]
   },
   "include": ["src", "vite.config.ts"]

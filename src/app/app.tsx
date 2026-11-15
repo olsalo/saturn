@@ -19,29 +19,32 @@ import {
 } from "@/features/capture/capture-panel";
 import { ExportPanel } from "@/features/export/export-panel";
 import { ProjectMenu } from "@/features/project/project-menu";
+import { usePreferences } from "@/lib/preferences";
 import { api, native } from "@/lib/tauri";
 import type { CaptureSource } from "@/lib/contracts";
 import { useAppEvents } from "./use-app-events";
+import { useWindowReady } from "./use-window-ready";
 import { isBusy } from "./recorder-machine";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 export default function App() {
-  const { state, working, run, dismiss } = useAppEvents();
+  const { state, initialized, working, run, dismiss } = useAppEvents();
+  const initializing = !initialized || (!!state.openingProject && !state.project);
   const [source, setSource] = useState<CaptureSource | null>(null);
-  const [captureOptions, setCaptureOptions] = useState<CaptureOptions>({
-    audio: true,
-    mic: false,
-    countdownEnabled: false,
-  });
+  const [captureOptions, setCaptureOptions] = usePreferences<CaptureOptions>(
+    "saturn.capture-options",
+    { audio: true, mic: false, countdownEnabled: false },
+  );
   const [help, setHelp] = useState(false);
   const [fileAccessOpen, setFileAccessOpen] = useState(false);
   const [fileAccessError, setFileAccessError] = useState("");
   const fileSettingsOpen = useRef(false);
   const [actionFooter, setActionFooter] = useState<HTMLElement | null>(null);
+  useWindowReady(!initializing && actionFooter !== null);
   const busy = isBusy(state.mode);
   const editing =
     !!state.project &&
-    !["starting", "recording", "stopping", "finalizing"].includes(state.mode);
-  const showRecovery = !editing && state.recoveries.length > 0 && !busy;
+    !["starting", "recording", "pausing", "paused", "resuming", "stopping", "finalizing"].includes(state.mode);
+  const showRecovery = !initializing && !editing && state.recoveries.length > 0 && !busy;
   const recoveryError = showRecovery &&
     state.error?.startsWith("Saturn couldn’t finish the recording")
       ? state.error
@@ -60,8 +63,6 @@ export default function App() {
         if (message.includes("SATURN_FILE_ACCESS_REQUIRED")) {
           setFileAccessError(chooseFolder ? "Saturn still can’t access the recording or that folder. Choose another folder or allow access in System Settings." : "");
           setFileAccessOpen(true);
-        } else if (chooseFolder && message.includes("No folder selected")) {
-          setFileAccessError("");
         } else {
           throw error;
         }
@@ -137,8 +138,9 @@ export default function App() {
             <p>
               Your .saturn project keeps your recording and settings together so
               you can reopen and export it again. Press Control + Option +
-              Command + R (⌃⌥⌘R) to start or stop recording, even while Saturn
-              is hidden.
+              Command + R (⌃⌥⌘R) to start or stop recording, and Control +
+              Option + Command + P (⌃⌥⌘P) to pause or continue, even while
+              Saturn is hidden.
             </p>
             <Button variant="ghost" size="xs" onClick={() => setHelp(false)}>
               Got it
@@ -147,7 +149,9 @@ export default function App() {
         </Popover>
         <ProjectMenu
           hasProject={!!state.project}
-          disabled={busy || working}
+          recordingView={!editing}
+          recordingsFolderAvailable={state.recordingsFolderAvailable}
+          disabled={initializing || busy || working}
           run={run}
         />
       </header>
@@ -155,7 +159,9 @@ export default function App() {
         <div
           className={`panel-content ${editing ? "panel-content-export" : "panel-content-capture"}`}
         >
-          {editing ? (
+          {initializing ? (
+            <div className="startup-loading" role="status">Opening Saturn…</div>
+          ) : editing ? (
             <ExportPanel
               state={state}
               working={working}
@@ -215,7 +221,7 @@ export default function App() {
               <Alert>
                 <AlertTitle>{state.error}</AlertTitle>
                 <AlertAction>
-                  <Button size="xs" onClick={dismiss}>
+                  <Button variant="ghost" size="xs" onClick={dismiss}>
                     Got this
                   </Button>
                 </AlertAction>
@@ -230,6 +236,7 @@ export default function App() {
                 </AlertTitle>
                 <AlertAction>
                   <Button
+                    variant="outline"
                     size="xs"
                     disabled={busy || working}
                     onClick={() => run(() => api.open(true))}
@@ -254,6 +261,7 @@ export default function App() {
                     Discard
                   </Button>
                   <Button
+                    variant="outline"
                     size="xs"
                     disabled={working}
                     onClick={() => recover()}

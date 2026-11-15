@@ -1,4 +1,4 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-/* Change this import to coss.css to preview the default preset. */
+/* Change this import to default.css to preview the default preset. */
 @import "../components/ui/styles/saturn.css";

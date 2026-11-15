@@ -1,21 +1,14 @@
-import { useState } from "react";
-import wallpapers from "@/lib/wallpapers.json";
+import { useCallback, useLayoutEffect, useState } from "react";
+import {
+  wallpaperPresets as wallpapers,
+  wallpaperPresetId,
+} from "@/lib/wallpapers";
 import Icon from "@/components/ui/icons/icons";
 import { Button } from "@/components/ui/button";
-import {
-  Popover,
-  PopoverTrigger,
-  PopoverPopup,
-} from "@/components/ui/popover";
+import { Popover, PopoverTrigger, PopoverPopup } from "@/components/ui/popover";
 import { useBackgroundImage } from "./use-background-image";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Background } from "@/lib/contracts";
-export const backgroundCss = {
-  dawn: "linear-gradient(135deg,#a2b5ee,#d6bfde 50%,#f4c6ac)",
-  dusk: "linear-gradient(135deg,#6667ac,#b894ba 50%,#edbdac)",
-  mint: "linear-gradient(135deg,#224c4b,#6a9f8c 50%,#d1dfb2)",
-  ink: "linear-gradient(135deg,#1a1d24,#424b5a 50%,#777d87)",
-};
 export function BackgroundPicker({
   value,
   backgroundPath,
@@ -36,14 +29,56 @@ export function BackgroundPicker({
   onPreset: (preset: string) => Promise<boolean>;
 }) {
   const [open, setOpen] = useState(false);
+  const [grid, setGrid] = useState<HTMLDivElement | null>(null);
   const preview = useBackgroundImage(value, backgroundPath, backgroundRevision);
+  const selectedPreset =
+    value.type === "embeddedImage" && value.preset
+      ? wallpaperPresetId(value.preset)
+      : undefined;
+  const missingPreset =
+    value.type === "embeddedImage" &&
+    !!value.preset &&
+    !wallpapers.some((wallpaper) => wallpaper.id === selectedPreset);
+  const centerSelection = useCallback(() => {
+    if (!grid) return;
+    const viewport = grid.closest<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]',
+    );
+    const selected = grid.querySelector<HTMLElement>('[aria-pressed="true"]');
+    if (!viewport || !selected) return;
+    const viewportRect = viewport.getBoundingClientRect();
+    const selectedRect = selected.getBoundingClientRect();
+    if (!viewport.clientHeight || !viewportRect.height) return;
+    const scale = viewportRect.height / viewport.offsetHeight;
+    viewport.scrollTop +=
+      (selectedRect.top + selectedRect.height / 2 - viewportRect.top) / scale -
+      viewport.clientHeight / 2;
+  }, [grid]);
+  useLayoutEffect(() => {
+    if (!open || !grid) return;
+    const viewport = grid.closest<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]',
+    );
+    if (!viewport) return;
+    centerSelection();
+    const observer = new ResizeObserver(centerSelection);
+    observer.observe(viewport);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [open, grid, centerSelection]);
   return (
     <div className="background-row">
       <div className={visuallyDisabled ? "option-label-disabled" : undefined}>
         <strong>Background</strong>
         <p>Choose a backdrop for your video</p>
       </div>
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={open}
+        onOpenChange={setOpen}
+        onOpenChangeComplete={(opened) => {
+          if (opened) centerSelection();
+        }}
+      >
         <PopoverTrigger
           render={
             <Button
@@ -64,6 +99,10 @@ export function BackgroundPicker({
           side="top"
           aria-label="Choose background"
           className="background-popover"
+          // Focusing the first tile would undo the selected tile's scroll position.
+          initialFocus={() =>
+            grid?.querySelector<HTMLElement>('[aria-pressed="true"]') ?? false
+          }
         >
           <ScrollArea
             className="background-scroll"
@@ -72,6 +111,7 @@ export function BackgroundPicker({
             scrollbarClassName="hidden"
           >
             <div
+              ref={setGrid}
               className="background-grid"
               role="group"
               aria-label="Background options"
@@ -94,6 +134,12 @@ export function BackgroundPicker({
               <Button
                 variant="outline"
                 className={`background-tile custom-tile ${value.type === "embeddedImage" && !value.preset ? "selected" : ""}`}
+                style={{
+                  backgroundImage:
+                    value.type === "embeddedImage" && !value.preset
+                      ? (preview ?? undefined)
+                      : undefined,
+                }}
                 aria-pressed={value.type === "embeddedImage" && !value.preset}
                 aria-label="Choose background image"
                 onClick={() => {
@@ -110,52 +156,60 @@ export function BackgroundPicker({
                   className="tile-icon"
                 />
               </Button>
-              {(
-                Object.keys(backgroundCss) as (keyof typeof backgroundCss)[]
-              ).map((preset) => (
+              {(["white", "black"] as const).map((color) => (
                 <Button
-                  key={preset}
+                  key={color}
                   variant="outline"
-                  className={`background-tile gradient-tile ${value.type === "gradient" && value.preset === preset ? "selected" : ""}`}
-                  style={{ background: backgroundCss[preset] }}
-                  aria-label={`${preset} background`}
-                  aria-pressed={
-                    value.type === "gradient" && value.preset === preset
-                  }
+                  className={`background-tile solid-tile ${color === "white" ? "white-tile" : ""} ${value.type === "solid" && value.color === color ? "selected" : ""}`}
+                  style={{ background: color }}
+                  aria-label={`${color} background`}
+                  aria-pressed={value.type === "solid" && value.color === color}
                   onClick={() => {
-                    onChange({ type: "gradient", preset });
+                    onChange({ type: "solid", color });
                     setOpen(false);
                   }}
                 >
-                  {value.type === "gradient" && value.preset === preset && (
+                  {value.type === "solid" && value.color === color && (
                     <Icon name="check" className="tile-icon" />
                   )}
                 </Button>
               ))}
+              {missingPreset && (
+                <Button
+                  variant="outline"
+                  className="background-tile saved-background-tile selected"
+                  style={{ backgroundImage: preview ?? undefined }}
+                  aria-label="Saved wallpaper, no longer in collection"
+                  aria-pressed={true}
+                  onClick={() => setOpen(false)}
+                >
+                  <Icon name="check" className="tile-icon" />
+                </Button>
+              )}
               {wallpapers.map((wallpaper) => (
                 <Button
                   key={wallpaper.id}
                   variant="outline"
-                  className={`background-tile ${value.type === "embeddedImage" && value.preset === wallpaper.id ? "selected" : ""}`}
+                  className={`background-tile ${selectedPreset === wallpaper.id ? "selected" : ""}`}
                   aria-label={`${wallpaper.label} background`}
-                  aria-pressed={
-                    value.type === "embeddedImage" &&
-                    value.preset === wallpaper.id
-                  }
+                  aria-pressed={selectedPreset === wallpaper.id}
                   onClick={() => {
                     void onPreset(wallpaper.id);
                     setOpen(false);
                   }}
                 >
                   <img
-                    src={`/wallpapers/thumbs/${wallpaper.id}`}
+                    src={`/wallpapers/${wallpaper.path
+                      .split("/")
+                      .map(encodeURIComponent)
+                      .join("/")
+                      .replace(/\/([^/]+)$/, "/thumbs/$1")}`}
                     alt=""
                     loading="lazy"
                   />
-                  {value.type === "embeddedImage" &&
-                    value.preset === wallpaper.id && (
-                      <Icon name="check" className="tile-icon" />
-                    )}
+                  {selectedPreset === wallpaper.id && (
+                    <Icon name="check" className="tile-icon" />
+                  )}
                 </Button>
               ))}
             </div>

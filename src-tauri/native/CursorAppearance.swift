@@ -60,7 +60,7 @@ struct CursorObservation {
     }
 }
 
-let cursorMagnification = 1.75
+let cursorMagnification = 2.0
 
 /// Sprite geometry is relative to the real click hotspot, with Core Animation's
 /// bottom-left coordinates. Scaling the image must never move the click point.

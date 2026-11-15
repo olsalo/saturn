@@ -33,9 +33,6 @@ input:focus-visible {
   outline: 2px solid var(--foreground);
   outline-offset: 3px;
 }
-button:not(:disabled) {
-  cursor: pointer;
-}
 #root {
   min-height: 100dvh;
   display: flex;
@@ -141,9 +138,11 @@ button:not(:disabled) {
   margin: 0 0 0px;
 }
 .capture-art {
-  display: block;
   width: 100%;
   height: 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
 }
 .live-badge {
   position: absolute;
@@ -253,7 +252,7 @@ button:not(:disabled) {
   align-items: center;
   gap: 7px;
   font-size: 14px;
-  cursor: pointer;
+  cursor: default;
 }
 .audio-options label:has([data-slot="switch"][data-disabled]) {
   cursor: default;
@@ -445,6 +444,13 @@ button:not(:disabled) {
   overflow: hidden;
   border: 0;
   box-shadow: inset 0 0 0 1px #00000009;
+}
+.startup-loading {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  color: var(--muted-foreground);
+  font-size: 13px;
 }
 .preview-source {
   max-width: 100%;
@@ -739,10 +745,10 @@ html[data-desktop] #root {
 }
 html[data-desktop] .floating-panel {
   border-radius: 6px;
-  box-shadow: none;
+  box-shadow: 0 6px 16px #00000012, 0 1px 4px #0000000f;
   width: 100%;
   min-height: 100dvh;
-  border: 0;
+  border: 0px solid #dddddd;
 }
 
 .system-picker-action {
@@ -774,7 +780,7 @@ html[data-desktop] .floating-panel {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  cursor: pointer;
+  cursor: default;
   padding: 9px 11px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1104,6 +1110,11 @@ body,
   height: 100%;
   object-fit: cover;
 }
+.background-tile.saved-background-tile,
+.background-tile.custom-tile {
+  background-size: cover;
+  background-position: center;
+}
 .background-tile.selected {
   outline: 2px solid var(--foreground);
   outline-offset: 1px;
@@ -1224,6 +1235,7 @@ html[data-desktop] {
 
 .modal-drag-region {
   position: fixed;
+  pointer-events: auto;
   top: 0;
   left: 0;
   right: 0;
@@ -1237,7 +1249,7 @@ html[data-desktop] {
   margin-top: 14px;
   color: var(--muted-foreground);
   font-size: 13px;
-  cursor: pointer;
+  cursor: default;
 }
 .countdown-option [data-slot="switch"] {
   --thumb-size: 16px;
@@ -1278,7 +1290,7 @@ html[data-desktop] {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  cursor: pointer;
+  cursor: default;
 }
 .website-export-setting:has([data-slot="switch"][data-disabled]) label {
   cursor: default;
@@ -1318,7 +1330,8 @@ html[data-desktop] {
   opacity: 1;
 }
 
-.background-tile.custom-tile {
+.background-tile.custom-tile,
+.background-tile.white-tile {
   border: 1px solid var(--border) !important;
 }
 

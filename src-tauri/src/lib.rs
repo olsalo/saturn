@@ -2,12 +2,16 @@ mod export;
 mod platform;
 mod project;
 mod recording;
+mod window_position;
 use project::{manifest::Appearance, Project};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Mutex,
+    },
 };
 use tauri::{Emitter, Manager};
 
@@ -16,6 +20,7 @@ type Result<T> = std::result::Result<T, String>;
 pub struct Session {
     mode: String,
     started_at_ms: Option<i64>,
+    recorded_duration_ms: i64,
     project: Option<Project>,
     work: Option<PathBuf>,
     job: Option<String>,
@@ -28,11 +33,14 @@ pub struct Session {
     window_defaults: CaptureDefaults,
     display_defaults: CaptureDefaults,
 }
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct CaptureDefaults {
     aspect_ratio: Option<String>,
     resolution: Option<String>,
     background: Option<(project::manifest::Background, Option<Vec<u8>>)>,
+    appearance: Option<Appearance>,
+    export_audio: Option<(bool, bool)>,
 }
 impl CaptureDefaults {
     fn window() -> Self {
@@ -40,6 +48,7 @@ impl CaptureDefaults {
             aspect_ratio: Some("16:10".into()),
             resolution: Some("high".into()),
             background: None,
+            ..Default::default()
         }
     }
     fn display() -> Self {
@@ -47,6 +56,7 @@ impl CaptureDefaults {
             aspect_ratio: Some("original".into()),
             resolution: Some("original".into()),
             background: None,
+            ..Default::default()
         }
     }
     fn apply(self, manifest: &mut project::manifest::Manifest, work: &Path) -> Result<()> {
@@ -56,9 +66,17 @@ impl CaptureDefaults {
         if let Some(resolution) = self.resolution {
             manifest.export_settings.resolution = Some(resolution);
         }
+        if let Some(appearance) = self.appearance {
+            appearance.validate()?;
+            manifest.appearance = appearance;
+        }
+        if let Some((system, microphone)) = self.export_audio {
+            manifest.export_settings.include_system_audio = system;
+            manifest.export_settings.include_microphone_audio = microphone;
+        }
         if let Some((background, bytes)) = self.background {
             if let project::manifest::Background::EmbeddedImage { path, .. } = &background {
-                let bytes = bytes.ok_or("Missing session background image")?;
+                let bytes = bytes.ok_or("Missing saved background image")?;
                 let name = path
                     .strip_prefix("assets/")
                     .ok_or("Invalid background reference")?;
@@ -81,7 +99,7 @@ impl Session {
             &mut self.window_defaults
         }
     }
-    fn remember_background(&mut self) -> Result<()> {
+    fn remember_appearance(&mut self) -> Result<()> {
         let p = self.project.as_ref().ok_or("No open project")?;
         let kind = p.manifest.media.capture_kind.clone();
         let background = p.manifest.appearance.background.clone();
@@ -91,11 +109,52 @@ impl Session {
             }
             _ => None,
         };
-        self.defaults_mut(&kind).background = Some((background, bytes));
+        let appearance = p.manifest.appearance.clone();
+        let defaults = self.defaults_mut(&kind);
+        defaults.appearance = Some(appearance);
+        defaults.background = Some((background, bytes));
         Ok(())
     }
 }
+// Kept separate from preferences.json, which owns the recordings folder.
+#[derive(Serialize, Deserialize)]
+struct RecordingDefaults {
+    window: CaptureDefaults,
+    display: CaptureDefaults,
+}
+impl Default for RecordingDefaults {
+    fn default() -> Self {
+        Self {
+            window: CaptureDefaults::window(),
+            display: CaptureDefaults::display(),
+        }
+    }
+}
+impl RecordingDefaults {
+    fn load(root: &Path) -> Self {
+        fs::read(root.join("recording-defaults.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+    fn save(&self, root: &Path) -> Result<()> {
+        let bytes = serde_json::to_vec(self).map_err(|e| e.to_string())?;
+        let temporary = root.join("recording-defaults.json.tmp");
+        fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
+        fs::rename(temporary, root.join("recording-defaults.json")).map_err(|e| e.to_string())
+    }
+}
+fn save_defaults(state: &Shared, session: &Session) -> Result<()> {
+    RecordingDefaults {
+        window: session.window_defaults.clone(),
+        display: session.display_defaults.clone(),
+    }
+    .save(&state.root)
+}
 pub struct Shared {
+    opening_documents: AtomicUsize,
+    frontend_ready: AtomicBool,
+    recordings_folder_available: AtomicBool,
     inner: Mutex<Session>,
     root: PathBuf,
 }
@@ -126,8 +185,11 @@ struct ProjectView {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
+    opening_project: bool,
+    recordings_folder_available: bool,
     mode: String,
     started_at_ms: Option<i64>,
+    recorded_duration_ms: i64,
     project: Option<ProjectView>,
     error: Option<String>,
     progress: f64,
@@ -138,9 +200,12 @@ struct Snapshot {
     recoveries: Vec<String>,
     saving: bool,
 }
-fn snapshot(s: &Session) -> Snapshot {
+fn snapshot(s: &Session, opening_project: bool, recordings_folder_available: bool) -> Snapshot {
     Snapshot {
+        opening_project,
+        recordings_folder_available,
         started_at_ms: s.started_at_ms,
+        recorded_duration_ms: s.recorded_duration_ms,
         mode: if s.mode.is_empty() {
             "idle".into()
         } else {
@@ -158,12 +223,8 @@ fn snapshot(s: &Session) -> Snapshot {
             capture_kind: p.manifest.media.capture_kind.clone(),
             width: p.manifest.media.width,
             height: p.manifest.media.height,
-            thumbnail_path: p.work.join("preview/thumbnail.jpg").is_file().then(|| {
-                p.work
-                    .join("preview/thumbnail.jpg")
-                    .to_string_lossy()
-                    .into()
-            }),
+            thumbnail_path: project::archive::thumbnail_path(&p.work)
+                .map(|path| p.work.join(path).to_string_lossy().into()),
             background_path: if let project::manifest::Background::EmbeddedImage { path, .. } =
                 &p.manifest.appearance.background
             {
@@ -204,19 +265,21 @@ fn snapshot(s: &Session) -> Snapshot {
                 .resolution
                 .clone()
                 .unwrap_or_else(|| "high".into()),
-            separate_audio: p.manifest.media.separate_audio.is_some(),
-            has_system_audio: p
+            separate_audio: p
                 .manifest
-                .media
-                .separate_audio
-                .as_ref()
-                .is_some_and(|a| a.system.is_some()),
-            has_microphone_audio: p
-                .manifest
-                .media
-                .separate_audio
-                .as_ref()
-                .is_some_and(|a| a.microphone.is_some()),
+                .sources()
+                .iter()
+                .any(|(m, _)| m.separate_audio.is_some()),
+            has_system_audio: p.manifest.sources().iter().any(|(m, _)| {
+                m.separate_audio
+                    .as_ref()
+                    .is_some_and(|a| a.system.is_some())
+            }),
+            has_microphone_audio: p.manifest.sources().iter().any(|(m, _)| {
+                m.separate_audio
+                    .as_ref()
+                    .is_some_and(|a| a.microphone.is_some())
+            }),
             include_system_audio: p.manifest.export_settings.include_system_audio,
             include_microphone_audio: p.manifest.export_settings.include_microphone_audio,
             export_fps: p.manifest.export_settings.frame_rate.min(
@@ -241,7 +304,16 @@ fn snapshot(s: &Session) -> Snapshot {
     }
 }
 fn notify(app: &tauri::AppHandle, s: &Session) {
-    let _ = app.emit("recorder://snapshot", snapshot(s));
+    let opening = app
+        .state::<Shared>()
+        .opening_documents
+        .load(Ordering::SeqCst)
+        > 0;
+    let available = app
+        .state::<Shared>()
+        .recordings_folder_available
+        .load(Ordering::SeqCst);
+    let _ = app.emit("recorder://snapshot", snapshot(s, opening, available));
 }
 fn lock(state: &Shared) -> Result<std::sync::MutexGuard<'_, Session>> {
     state
@@ -253,6 +325,9 @@ fn ensure_editable(s: &Session) -> Result<()> {
     if [
         "starting",
         "recording",
+        "pausing",
+        "paused",
+        "resuming",
         "stopping",
         "finalizing",
         "exporting",
@@ -283,15 +358,42 @@ fn workspace(state: &Shared) -> Result<PathBuf> {
 fn check_folder_access(folder: &Path) -> std::io::Result<()> {
     // A successful metadata check does not imply macOS will permit file creation.
     let probe = folder.join(format!(".saturn-access-{}", uuid::Uuid::new_v4()));
-    let file = fs::OpenOptions::new().write(true).create_new(true).open(&probe)?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?;
     drop(file);
     fs::remove_file(probe)
 }
-fn choose_recordings_folder(state: &Shared) -> Result<PathBuf> {
-    let folder = rfd::FileDialog::new()
-        .set_title("Choose a folder to allow Saturn to save recordings")
-        .pick_folder()
-        .ok_or("No folder selected. Choose a folder to allow Saturn to save recordings.")?;
+fn saved_recordings_folder(root: &Path) -> Option<PathBuf> {
+    let data = fs::read(root.join("preferences.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&data).ok()?;
+    Some(PathBuf::from(value["recordingsFolder"].as_str()?))
+}
+fn accessible_recordings_folder(root: &Path) -> Option<PathBuf> {
+    saved_recordings_folder(root).filter(|folder| check_folder_access(folder).is_ok())
+}
+fn pick_recordings_folder(app: &tauri::AppHandle, state: &Shared) -> Result<Option<PathBuf>> {
+    let mut dialog =
+        rfd::FileDialog::new().set_title("Choose the default folder for recordings");
+    if let Some(folder) = saved_recordings_folder(&state.root) {
+        dialog = dialog.set_directory(folder);
+    }
+    let window = app.get_webview_window("main");
+    let was_always_on_top = match &window {
+        Some(window) => window.is_always_on_top().map_err(|e| e.to_string())?,
+        None => false,
+    };
+    if was_always_on_top {
+        window.as_ref().unwrap().set_always_on_top(false).map_err(|e| e.to_string())?;
+    }
+    let selected = dialog.pick_folder();
+    if was_always_on_top {
+        window.as_ref().unwrap().set_always_on_top(true).map_err(|e| e.to_string())?;
+    }
+    let Some(folder) = selected else {
+        return Ok(None);
+    };
     check_folder_access(&folder).map_err(|e| format!(
         "Saturn cannot write to the selected folder: {e}. Choose a different folder or allow access in System Settings."
     ))?;
@@ -301,28 +403,66 @@ fn choose_recordings_folder(state: &Shared) -> Result<PathBuf> {
         serde_json::to_vec(&serde_json::json!({"recordingsFolder":folder})).unwrap(),
     )
     .map_err(|e| e.to_string())?;
-    Ok(folder)
+    state
+        .recordings_folder_available
+        .store(true, Ordering::SeqCst);
+    Ok(Some(folder))
 }
 fn recordings_folder(state: &Shared) -> Result<PathBuf> {
-    let pref = state.root.join("preferences.json");
-    if let Ok(data) = fs::read(&pref) {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) {
-            if let Some(p) = v["recordingsFolder"].as_str() {
-                let folder = PathBuf::from(p);
-                if check_folder_access(&folder).is_ok() {
-                    return Ok(folder);
-                }
-            }
-        }
+    if let Some(folder) = accessible_recordings_folder(&state.root) {
+        state
+            .recordings_folder_available
+            .store(true, Ordering::SeqCst);
+        return Ok(folder);
     }
-    choose_recordings_folder(state)
+    state
+        .recordings_folder_available
+        .store(false, Ordering::SeqCst);
+    Err("The recordings folder is no longer available. Choose a folder and try again.".into())
+}
+#[tauri::command]
+async fn prepare_recordings_folder(app: tauri::AppHandle) -> Result<bool> {
+    blocking(move || {
+        let state = app.state::<Shared>();
+        let s = lock(&state)?;
+        ensure_editable(&s)?;
+        if accessible_recordings_folder(&state.root).is_some() {
+            return Ok(true);
+        }
+        state.recordings_folder_available.store(false, Ordering::SeqCst);
+        let selected = pick_recordings_folder(&app, &state)?.is_some();
+        notify(&app, &s);
+        Ok(selected)
+    }).await
+}
+#[tauri::command]
+async fn change_recordings_folder(app: tauri::AppHandle) -> Result<()> {
+    blocking(move || {
+        let state = app.state::<Shared>();
+        let s = lock(&state)?;
+        ensure_editable(&s)?;
+        if accessible_recordings_folder(&state.root).is_none() {
+            state
+                .recordings_folder_available
+                .store(false, Ordering::SeqCst);
+            notify(&app, &s);
+            return Err("Choose and allow a recordings folder when starting your first recording.".into());
+        }
+        pick_recordings_folder(&app, &state)?;
+        notify(&app, &s);
+        Ok(())
+    })
+    .await
 }
 fn permission_error(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(libc::EPERM)
+    error.kind() == std::io::ErrorKind::PermissionDenied
+        || error.raw_os_error() == Some(libc::EPERM)
 }
 const FILE_ACCESS_REQUIRED: &str = "SATURN_FILE_ACCESS_REQUIRED";
 fn recovery_permission_failure(error: &str) -> bool {
-    error.contains("os error 1)") || error.contains("os error 13)") || error.contains(FILE_ACCESS_REQUIRED)
+    error.contains("os error 1)")
+        || error.contains("os error 13)")
+        || error.contains(FILE_ACCESS_REQUIRED)
 }
 fn save_recording_with_folder_retry(project: &mut Project, _state: &Shared) -> Result<()> {
     let parent = project.path.parent().ok_or("Invalid save folder")?;
@@ -334,7 +474,11 @@ fn save_recording_with_folder_retry(project: &mut Project, _state: &Shared) -> R
         };
     }
     project.save().map_err(|error| {
-        if recovery_permission_failure(&error) { FILE_ACCESS_REQUIRED.into() } else { error }
+        if recovery_permission_failure(&error) {
+            FILE_ACCESS_REQUIRED.into()
+        } else {
+            error
+        }
     })
 }
 fn unique_path(parent: &Path, name: &str, ext: &str) -> PathBuf {
@@ -349,6 +493,7 @@ fn unique_path(parent: &Path, name: &str, ext: &str) -> PathBuf {
 fn scoped(app: &tauri::AppHandle, project: &Project) {
     for relative in [
         "preview/thumbnail.jpg",
+        "preview/thumbnail.png",
         "assets/background.jpg",
         "assets/background.png",
     ] {
@@ -365,6 +510,19 @@ fn retire(old: Option<Project>) {
         }
     }
 }
+fn ensure_preview_thumbnail(work: &Path, manifest: &project::manifest::Manifest) {
+    let destination = work.join("preview/thumbnail.jpg");
+    // Match the poster bounds using preserved media, never by resizing an old JPEG.
+    // A preview failure must not prevent opening or recovering the recording.
+    if fs::create_dir_all(work.join("preview")).is_err() {
+        return;
+    }
+    let source = work.join(&manifest.media.path);
+    let _ = platform::call(
+        "ensure-thumbnail",
+        &[&source.to_string_lossy(), &destination.to_string_lossy()],
+    );
+}
 fn open_path(app: &tauri::AppHandle, s: &mut Session, state: &Shared, path: PathBuf) -> Result<()> {
     ensure_editable(s)?;
     if !matches!(
@@ -380,6 +538,7 @@ fn open_path(app: &tauri::AppHandle, s: &mut Session, state: &Shared, path: Path
         .join(uuid::Uuid::new_v4().to_string());
     let mut manifest = project::archive::open(&path, &work)?;
     manifest.use_export_layout();
+    ensure_preview_thumbnail(&work, &manifest);
     let p = Project {
         path,
         work,
@@ -401,8 +560,48 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-fn get_snapshot(state: tauri::State<Shared>) -> Result<Snapshot> {
-    Ok(snapshot(&*lock(&state)?))
+fn frontend_ready(app: tauri::AppHandle) -> Result<()> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Main window unavailable")?;
+    // React StrictMode and later snapshot updates must never reveal the panel
+    // again after capture has hidden it.
+    if app
+        .state::<Shared>()
+        .frontend_ready
+        .swap(true, Ordering::SeqCst)
+    {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        let _ = window.show();
+        let _ = window.set_focus();
+    });
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+#[tauri::command]
+async fn get_snapshot(app: tauri::AppHandle) -> Result<Snapshot> {
+    blocking(move || {
+        let state = app.state::<Shared>();
+        // Initial hydration waits for a project already being unpacked instead
+        // of reporting a transient lock error and showing the recording screen.
+        let s = state
+            .inner
+            .lock()
+            .map_err(|_| "Session unavailable".to_string())?;
+        Ok(snapshot(
+            &s,
+            state.opening_documents.load(Ordering::SeqCst) > 0,
+            state.recordings_folder_available.load(Ordering::SeqCst),
+        ))
+    })
+    .await
 }
 #[tauri::command]
 async fn list_capture_sources() -> Result<serde_json::Value> {
@@ -432,8 +631,26 @@ async fn request_microphone_permission() -> Result<serde_json::Value> {
 async fn open_microphone_settings() -> Result<()> {
     blocking(|| platform::call("open-microphone-settings", &[]).map(|_| ())).await
 }
+fn recoverable_clip_paths(work: &Path) -> Vec<(String, PathBuf)> {
+    let mut clips: Vec<_> = fs::read_dir(work.join("clips"))
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let id = entry.file_name().to_str()?.to_owned();
+            let path = entry.path().join("media/source.mov");
+            (project::manifest::valid_clip_id(&id)
+                && fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0))
+            .then_some((id, path))
+        })
+        .collect();
+    clips.sort_by(|a, b| a.0.cmp(&b.0));
+    clips
+}
 fn has_recoverable_data(work: &Path) -> bool {
-    work.join("manifest.json").is_file()
+    !recoverable_clip_paths(work).is_empty()
+        || work.join("clips.json").is_file()
+        || work.join("manifest.json").is_file()
         || fs::metadata(work.join("media/source.mov")).is_ok_and(|m| m.is_file() && m.len() > 0)
         || fs::metadata(work.join("media/source.mp4")).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
@@ -446,7 +663,9 @@ fn mark_recovery_complete(work: &Path) -> Result<()> {
     match fs::remove_file(work.join("dirty")) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("The project was saved, but Saturn could not mark recovery complete: {error}")),
+        Err(error) => Err(format!(
+            "The project was saved, but Saturn could not mark recovery complete: {error}"
+        )),
     }
 }
 #[tauri::command]
@@ -460,13 +679,41 @@ async fn start_recording(
 fn stop_recording(app: tauri::AppHandle) -> Result<()> {
     let state = app.state::<Shared>();
     let mut s = lock(&state)?;
-    if s.mode != "recording" {
+    if !["recording", "pausing", "paused", "resuming"].contains(&s.mode.as_str()) {
         return Err("No active recording".into());
     }
     let work = s.work.as_ref().ok_or("No active workspace")?;
     fs::write(work.join("stop"), b"").map_err(|e| e.to_string())?;
     s.mode = "stopping".into();
     notify(&app, &s);
+    Ok(())
+}
+#[tauri::command]
+fn pause_recording(app: tauri::AppHandle) -> Result<()> {
+    recording_control(&app, "recording", "pausing", "pause")
+}
+#[tauri::command]
+fn continue_recording(app: tauri::AppHandle) -> Result<()> {
+    recording_control(&app, "paused", "resuming", "continue")
+}
+fn recording_control(
+    app: &tauri::AppHandle,
+    expected: &str,
+    next: &str,
+    signal: &str,
+) -> Result<()> {
+    let state = app.state::<Shared>();
+    let mut s = lock(&state)?;
+    if s.mode != expected {
+        return Err("Recording state changed; try again when ready".into());
+    }
+    fs::write(
+        s.work.as_ref().ok_or("No active workspace")?.join(signal),
+        b"",
+    )
+    .map_err(|e| e.to_string())?;
+    s.mode = next.into();
+    notify(app, &s);
     Ok(())
 }
 #[tauri::command]
@@ -514,7 +761,8 @@ async fn update_project_appearance(app: tauri::AppHandle, appearance: Appearance
         p.manifest.appearance = appearance;
         p.manifest.update_export_dimensions();
         save_current(&app, &mut s)?;
-        s.remember_background()
+        s.remember_appearance()?;
+        save_defaults(&state, &s)
     })
     .await
 }
@@ -564,7 +812,7 @@ async fn update_aspect_ratio(app: tauri::AppHandle, ratio: String) -> Result<()>
         p.manifest.update_export_dimensions();
         save_current(&app, &mut s)?;
         s.defaults_mut(&kind).aspect_ratio = Some(ratio);
-        Ok(())
+        save_defaults(&state, &s)
     })
     .await
 }
@@ -583,7 +831,7 @@ async fn update_resolution(app: tauri::AppHandle, resolution: String) -> Result<
         p.manifest.update_export_dimensions();
         save_current(&app, &mut s)?;
         s.defaults_mut(&kind).resolution = Some(resolution);
-        Ok(())
+        save_defaults(&state, &s)
     })
     .await
 }
@@ -597,10 +845,12 @@ async fn update_export_audio(app: tauri::AppHandle, system: bool, microphone: bo
         if p.manifest.media.separate_audio.is_none() {
             return Err("This recording does not have separate audio tracks".into());
         }
+        let kind = p.manifest.media.capture_kind.clone();
         p.manifest.export_settings.include_system_audio = system;
         p.manifest.export_settings.include_microphone_audio = microphone;
         save_current(&app, &mut s)?;
-        Ok(())
+        s.defaults_mut(&kind).export_audio = Some((system, microphone));
+        save_defaults(&state, &s)
     })
     .await
 }
@@ -649,37 +899,16 @@ async fn save_project_as(app: tauri::AppHandle) -> Result<()> {
 #[tauri::command]
 async fn choose_builtin_background(app: tauri::AppHandle, preset: String) -> Result<()> {
     blocking(move || {
-        let catalog: serde_json::Value =
-            serde_json::from_str(include_str!("../../src/lib/wallpapers.json"))
-                .map_err(|e| e.to_string())?;
-        if !catalog.as_array().is_some_and(|items| {
-            items
-                .iter()
-                .any(|item| item["id"].as_str() == Some(&preset))
-        }) {
-            return Err("Unknown background preset".into());
-        }
-        let asset = app
-            .asset_resolver()
-            .get(format!("wallpapers/{preset}"))
-            .ok_or("Bundled background image is unavailable")?;
-        if !asset.bytes().starts_with(&[255, 216, 255]) || asset.bytes().len() > 32 * 1024 * 1024 {
-            return Err("Bundled background is not a supported JPEG image".into());
-        }
+        let background = project::background::builtin(&app, &preset)?;
         let state = app.state::<Shared>();
         let mut s = lock(&state)?;
         ensure_editable(&s)?;
         let p = s.project.as_mut().ok_or("No open project")?;
-        let path = "assets/background.jpg";
-        project::write_background(&p.work, "background.jpg", asset.bytes())?;
-        p.manifest.appearance.background = project::manifest::Background::EmbeddedImage {
-            path: path.into(),
-            preset: Some(preset),
-        };
-        p.manifest.update_export_dimensions();
+        background.apply(&mut p.manifest, &p.work)?;
         scoped(&app, p);
         save_current(&app, &mut s)?;
-        s.remember_background()
+        s.remember_appearance()?;
+        save_defaults(&state, &s)
     })
     .await
 }
@@ -717,7 +946,8 @@ async fn choose_background(app: tauri::AppHandle) -> Result<()> {
         p.manifest.update_export_dimensions();
         scoped(&app, p);
         save_current(&app, &mut s)?;
-        s.remember_background()
+        s.remember_appearance()?;
+        save_defaults(&state, &s)
     })
     .await
 }
@@ -816,18 +1046,57 @@ async fn recover_recording(app: tauri::AppHandle, id: String, choose_folder: boo
             .find(|p| p.file_name().unwrap().to_string_lossy() == id)
             .cloned()
             .ok_or("Recovery no longer available")?;
+        let selected_folder = if choose_folder {
+            match pick_recordings_folder(&app, &state)? {
+                Some(folder) => Some(folder),
+                None => return Ok(()),
+            }
+        } else {
+            None
+        };
         let outcome = (|| -> Result<()> {
-            let selected_folder = if choose_folder { Some(choose_recordings_folder(&state)?) } else { None };
             let info = fs::read(work.join("recovery.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-            let mut manifest = if work.join("manifest.json").is_file() {
+            let mut manifest = if work.join("clips.json").is_file() {
+                let value: serde_json::Value = serde_json::from_slice(
+                    &fs::read(work.join("clips.json")).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+                recording::manifest_from_clips(&value)?
+            } else if work.join("manifest.json").is_file() {
                 let m: project::manifest::Manifest = serde_json::from_slice(
                     &fs::read(work.join("manifest.json")).map_err(|e| e.to_string())?,
                 )
                 .map_err(|e| e.to_string())?;
                 m.validate()?;
                 m
+            } else if !recoverable_clip_paths(&work).is_empty() {
+                let mut clips = vec![];
+                for (id, path) in recoverable_clip_paths(&work) {
+                    let Ok(info) = platform::call("inspect", &[&path.to_string_lossy()]) else {
+                        continue;
+                    };
+                    let base = project::manifest::Manifest::new(
+                        info["durationUs"].as_u64().unwrap_or(0),
+                        info["width"].as_u64().unwrap_or(0) as u32,
+                        info["height"].as_u64().unwrap_or(0) as u32,
+                        false,
+                        false,
+                    );
+                    let mut clip = project::manifest::Clip {
+                        id: id.clone(),
+                        media: base.media,
+                        cursor: base.cursor,
+                    };
+                    clip.media.path = format!("clips/{id}/media/source.mov");
+                    clip.cursor.path = format!("clips/{id}/cursor/events.jsonl");
+                    if !work.join(&clip.cursor.path).is_file() {
+                        fs::write(work.join(&clip.cursor.path), b"").map_err(|e| e.to_string())?;
+                    }
+                    clips.push(clip);
+                }
+                recording::manifest_from_clips(&serde_json::json!({"clips":clips}))?
             } else {
                 let v = platform::call(
                     "inspect",
@@ -843,7 +1112,7 @@ async fn recover_recording(app: tauri::AppHandle, id: String, choose_folder: boo
                     false,
                 )
             };
-            if !work.join("manifest.json").is_file() {
+            if !work.join("manifest.json").is_file() || work.join("clips.json").is_file() {
                 let request = fs::read(work.join("capture-request.json"))
                     .ok()
                     .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
@@ -855,6 +1124,7 @@ async fn recover_recording(app: tauri::AppHandle, id: String, choose_folder: boo
                 }
             }
             manifest.use_export_layout();
+            ensure_preview_thumbnail(&work, &manifest);
             let original_path = info
                 .and_then(|v| v["destination"].as_str().map(PathBuf::from))
                 .filter(|p| p.parent().is_some_and(Path::is_dir));
@@ -863,7 +1133,9 @@ async fn recover_recording(app: tauri::AppHandle, id: String, choose_folder: boo
             } else {
                 match original_path {
                     Some(path) if !path.exists() => path,
-                    Some(path) => unique_path(path.parent().unwrap(), "Recovered recording", "saturn"),
+                    Some(path) => {
+                        unique_path(path.parent().unwrap(), "Recovered recording", "saturn")
+                    }
                     None => return Err(FILE_ACCESS_REQUIRED.into()),
                 }
             };
@@ -874,16 +1146,27 @@ async fn recover_recording(app: tauri::AppHandle, id: String, choose_folder: boo
             };
             save_recording_with_folder_retry(&mut p, &state)?;
             mark_recovery_complete(&work)?;
+            let _ = fs::remove_file(work.join("clips.json"));
             scoped(&app, &p);
             retire(s.project.replace(p));
             s.mode = "export_ready".into();
             s.error = None;
             Ok(())
-        })().map_err(|error| if recovery_permission_failure(&error) { FILE_ACCESS_REQUIRED.into() } else { error });
+        })()
+        .map_err(|error| {
+            if recovery_permission_failure(&error) {
+                FILE_ACCESS_REQUIRED.into()
+            } else {
+                error
+            }
+        });
         if outcome.is_ok() {
             s.recoveries.retain(|p| p != &work);
             let _ = fs::remove_file(work.join("recovery-failed"));
-            if s.error.as_deref().is_some_and(|error| error.starts_with("Saturn couldn’t finish the recording")) {
+            if s.error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("Saturn couldn’t finish the recording"))
+            {
                 s.error = None;
             }
         }
@@ -908,7 +1191,10 @@ fn discard_recovery(app: tauri::AppHandle, id: String) -> Result<()> {
         .ok_or("Recovery no longer available")?;
     fs::remove_dir_all(&work).map_err(|e| e.to_string())?;
     s.recoveries.retain(|p| p != &work);
-    if s.error.as_deref().is_some_and(|error| error.starts_with("Saturn couldn’t finish the recording")) {
+    if s.error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("Saturn couldn’t finish the recording"))
+    {
         s.error = None;
     }
     notify(&app, &s);
@@ -923,7 +1209,46 @@ fn clear_error(app: tauri::AppHandle) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn open_documents(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+    app.state::<Shared>()
+        .opening_documents
+        .fetch_add(1, Ordering::SeqCst);
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let state = handle.state::<Shared>();
+        let mut s = state.inner.lock().unwrap();
+        for path in paths {
+            if ensure_editable(&s).is_ok()
+                && !s
+                    .project
+                    .as_ref()
+                    .is_some_and(|p| p.work.join("dirty").exists())
+            {
+                if let Err(e) = open_path(&handle, &mut s, &state, path) {
+                    s.error = Some(e);
+                }
+            } else {
+                s.pending.push(path);
+            }
+        }
+        state.opening_documents.fetch_sub(1, Ordering::SeqCst);
+        notify(&handle, &s);
+        if state.frontend_ready.load(Ordering::SeqCst) {
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+    });
+}
+
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    let mut open_requests = project::open_requests::OpenRequests::default();
     tauri::Builder::default()
         .setup(|app| {
             let root = app.path().app_data_dir()?;
@@ -942,11 +1267,17 @@ pub fn run() {
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| is_recovery_candidate(p))
                 .collect();
+            let defaults = RecordingDefaults::load(&root);
             app.manage(Shared {
+                opening_documents: AtomicUsize::new(0),
+                frontend_ready: AtomicBool::new(false),
+                recordings_folder_available: AtomicBool::new(
+                    accessible_recordings_folder(&root).is_some(),
+                ),
                 inner: Mutex::new(Session {
                     mode: "idle".into(),
-                    window_defaults: CaptureDefaults::window(),
-                    display_defaults: CaptureDefaults::display(),
+                    window_defaults: defaults.window,
+                    display_defaults: defaults.display,
                     recoveries,
                     ..Default::default()
                 }),
@@ -956,10 +1287,16 @@ pub fn run() {
             if let Err(error) = platform::shortcut::register(app.handle()) {
                 app.state::<Shared>().inner.lock().unwrap().error = Some(error);
             }
+            if let Some(window) = app.get_webview_window("main") {
+                window_position::restore_and_track(&window, &app.state::<Shared>().root)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            frontend_ready,
+            change_recordings_folder,
+            prepare_recordings_folder,
             list_capture_sources,
             check_capture_permissions,
             request_capture_permission,
@@ -969,6 +1306,8 @@ pub fn run() {
             open_microphone_settings,
             start_recording,
             stop_recording,
+            pause_recording,
+            continue_recording,
             open_project,
             update_project_appearance,
             update_aspect_ratio,
@@ -989,37 +1328,15 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("Could not launch Saturn")
-        .run(|app, event| match event {
+        .run(move |app, event| match event {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Exit => platform::shortcut::unregister(),
             #[cfg(target_os = "macos")]
+            tauri::RunEvent::Ready => open_documents(app, open_requests.ready()),
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
-                let handle = app.clone();
-                std::thread::spawn(move || {
-                    let state = handle.state::<Shared>();
-                    let mut s = state.inner.lock().unwrap();
-                    for url in urls {
-                        if let Ok(path) = url.to_file_path() {
-                            if ensure_editable(&s).is_ok()
-                                && !s
-                                    .project
-                                    .as_ref()
-                                    .is_some_and(|p| p.work.join("dirty").exists())
-                            {
-                                if let Err(e) = open_path(&handle, &mut s, &state, path) {
-                                    s.error = Some(e);
-                                }
-                            } else {
-                                s.pending.push(path);
-                            }
-                        }
-                    }
-                    notify(&handle, &s);
-                    if let Some(window) = handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                });
+                let paths = urls.into_iter().filter_map(|url| url.to_file_path().ok());
+                open_documents(app, open_requests.opened(paths));
             }
             tauri::RunEvent::WindowEvent {
                 event: tauri::WindowEvent::CloseRequested { api, .. },
@@ -1049,22 +1366,112 @@ pub fn run() {
 mod session_defaults_tests {
     use super::*;
     #[test]
+    fn recording_settings_survive_restart_and_project_cleanup() {
+        let root =
+            std::env::temp_dir().join(format!("saturn-preferences-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let mut defaults = RecordingDefaults::load(&root);
+        defaults.window.aspect_ratio = Some("1:1".into());
+        defaults.window.resolution = Some("small".into());
+        defaults.window.export_audio = Some((false, true));
+        let mut appearance = Appearance::default();
+        appearance.padding_percent = Some(12.0);
+        appearance.shadow = false;
+        appearance.cursor_smoothing = false;
+        appearance.click_animation = false;
+        defaults.window.appearance = Some(appearance);
+        defaults.window.background = Some((
+            project::manifest::Background::EmbeddedImage {
+                path: "assets/background.png".into(),
+                preset: None,
+            },
+            Some(vec![1, 2, 3]),
+        ));
+        defaults.save(&root).unwrap();
+        drop(defaults);
+        let restored = RecordingDefaults::load(&root);
+        let work = root.join("new-session");
+        fs::create_dir(&work).unwrap();
+        let mut manifest = project::manifest::Manifest::new(1_000_000, 1920, 1080, false, false);
+        restored.window.apply(&mut manifest, &work).unwrap();
+        assert_eq!(
+            manifest.export_settings.aspect_ratio.as_deref(),
+            Some("1:1")
+        );
+        assert_eq!(
+            manifest.export_settings.resolution.as_deref(),
+            Some("small")
+        );
+        assert!(!manifest.export_settings.include_system_audio);
+        assert!(manifest.export_settings.include_microphone_audio);
+        assert_eq!(manifest.appearance.padding_percent, Some(12.0));
+        assert!(!manifest.appearance.shadow);
+        assert!(!manifest.appearance.cursor_smoothing);
+        assert!(!manifest.appearance.click_animation);
+        assert_eq!(
+            fs::read(work.join("assets/background.png")).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(restored.display.resolution.as_deref(), Some("original"));
+        fs::write(root.join("recording-defaults.json"), b"corrupt").unwrap();
+        assert_eq!(
+            RecordingDefaults::load(&root).window.resolution.as_deref(),
+            Some("high")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn recovery_identifies_file_permission_errors() {
-        assert!(recovery_permission_failure("Operation not permitted (os error 1)"));
-        assert!(recovery_permission_failure("Permission denied (os error 13)"));
+        assert!(recovery_permission_failure(
+            "Operation not permitted (os error 1)"
+        ));
+        assert!(recovery_permission_failure(
+            "Permission denied (os error 13)"
+        ));
         assert!(recovery_permission_failure(FILE_ACCESS_REQUIRED));
         assert!(!recovery_permission_failure("No recoverable video track"));
     }
     #[test]
+    fn recordings_folder_requires_a_saved_accessible_directory() {
+        let root = std::env::temp_dir()
+            .join(format!("saturn-folder-preference-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let pref = root.join("preferences.json");
+        assert!(accessible_recordings_folder(&root).is_none());
+        fs::write(&pref, b"invalid json").unwrap();
+        assert!(accessible_recordings_folder(&root).is_none());
+        let folder = root.join("recordings");
+        fs::write(
+            &pref,
+            serde_json::to_vec(&serde_json::json!({ "recordingsFolder": folder })).unwrap(),
+        )
+        .unwrap();
+        assert!(accessible_recordings_folder(&root).is_none());
+        fs::create_dir(&folder).unwrap();
+        assert_eq!(accessible_recordings_folder(&root), Some(folder.clone()));
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+        fs::remove_dir(&folder).unwrap();
+        fs::write(&folder, b"a file is not a recording directory").unwrap();
+        assert!(accessible_recordings_folder(&root).is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
     fn folder_access_checks_actual_file_creation() {
-        let folder = std::env::temp_dir().join(format!("saturn-access-test-{}", uuid::Uuid::new_v4()));
+        let folder =
+            std::env::temp_dir().join(format!("saturn-access-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&folder).unwrap();
         check_folder_access(&folder).unwrap();
         assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
         assert!(check_folder_access(&folder.join("missing")).is_err());
-        assert!(permission_error(&std::io::Error::from_raw_os_error(libc::EPERM)));
-        assert!(permission_error(&std::io::Error::from_raw_os_error(libc::EACCES)));
-        assert!(!permission_error(&std::io::Error::from_raw_os_error(libc::ENOENT)));
+        assert!(permission_error(&std::io::Error::from_raw_os_error(
+            libc::EPERM
+        )));
+        assert!(permission_error(&std::io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+        assert!(!permission_error(&std::io::Error::from_raw_os_error(
+            libc::ENOENT
+        )));
         fs::remove_dir(folder).unwrap();
     }
     #[test]
@@ -1079,6 +1486,14 @@ mod session_defaults_tests {
         fs::write(work.join("media/source.mov"), b"partial footage").unwrap();
         assert!(has_recoverable_data(&work));
         fs::remove_file(work.join("media/source.mov")).unwrap();
+        fs::create_dir_all(work.join("clips/0001/media")).unwrap();
+        fs::write(
+            work.join("clips/0001/media/source.mov"),
+            b"segmented footage",
+        )
+        .unwrap();
+        assert!(has_recoverable_data(&work));
+        assert!(is_recovery_candidate(&work));
         fs::write(work.join("manifest.json"), b"{}").unwrap();
         assert!(has_recoverable_data(&work));
         fs::remove_dir_all(work).unwrap();

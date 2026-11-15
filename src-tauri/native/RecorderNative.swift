@@ -4,6 +4,7 @@ import ApplicationServices
 import ScreenCaptureKit
 import AVFoundation
 import QuartzCore
+import ImageIO
 
 enum NativeOutput {
     @TaskLocal static var reporter: (([String: Any]) -> Void)?
@@ -48,30 +49,101 @@ func selectableWindow(_ window: SCWindow) -> Bool {
         window.owningApplication?.bundleIdentifier != "com.saturn.recorder"
 }
 
-/// Keep Saturn's panel off the captured area and provide a menu-bar stop.
+/// Direct status-bar actions stay available while the recording panel is hidden.
 @MainActor final class RecordingBar: NSObject {
     static let shared = RecordingBar()
-    private var item: NSStatusItem?
+    private var pauseItem: NSStatusItem?
+    private var stopItem: NSStatusItem?
+    var pauseButton: NSStatusBarButton? { pauseItem?.button }
+    var stopButton: NSStatusBarButton? { stopItem?.button }
     private var hiddenWindows: [NSWindow] = []
     private var stopAction: (() -> Void)?
-    func begin(stop: @escaping () -> Void) {
-        stopAction = stop
-        let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        status.button?.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "Stop Saturn recording")
-        status.button?.title = " Stop"
-        status.button?.toolTip = "Stop Saturn recording (⌃⌥⌘R)"
-        status.button?.target = self; status.button?.action = #selector(stopRecording)
-        item = status
+    private var toggleAction: (() -> Void)?
+    private var isPaused = false
+    private var durationTimer: Timer?
+    private var recordedSeconds: TimeInterval = 0
+    private var clipStartedAt: TimeInterval?
+    func begin(stop: @escaping () -> Void, toggle: @escaping () -> Void) {
+        stopAction = stop; toggleAction = toggle
+        let pause = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        pause.button?.target = self; pause.button?.action = #selector(toggleRecording)
+        pauseItem = pause
+        let stop = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        stop.button?.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "Stop Saturn recording")
+        stop.button?.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        stop.button?.title = " 00:00 Stop"
+        stop.button?.toolTip = "Stop recording (⌃⌥⌘R)"
+        stop.button?.target = self; stop.button?.action = #selector(stopRecording)
+        stopItem = stop
         hiddenWindows = NSApp.windows.filter { $0.isVisible && !$0.isSheet }
-        for window in hiddenWindows { window.orderOut(nil) }
+        recordedSeconds = 0
+        clipStartedAt = nil
+        update(mode: "starting")
+        durationTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            // The timer is installed on the main run loop.
+            MainActor.assumeIsolated { self?.updateDurationTitle() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        durationTimer = timer
     }
-    @objc private func stopRecording() { stopAction?(); item?.button?.isEnabled = false }
-    func end() {
-        if let item { NSStatusBar.system.removeStatusItem(item) }
-        item = nil; stopAction = nil
+    func update(mode: String, recordedDurationUs: Int64? = nil) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if mode != "recording", let start = clipStartedAt {
+            recordedSeconds += max(0, now - start)
+            clipStartedAt = nil
+        }
+        if let recordedDurationUs {
+            recordedSeconds = Double(recordedDurationUs) / 1_000_000
+        }
+        if mode == "recording", clipStartedAt == nil { clipStartedAt = now }
+        updateDurationTitle()
+        let paused = mode == "paused"
+        isPaused = paused
+        pauseButton?.image = NSImage(systemSymbolName: paused ? "record.circle" : "pause.circle.fill", accessibilityDescription: paused ? "Continue Saturn recording" : "Pause Saturn recording")
+        pauseButton?.title = paused ? " Continue" : " Pause"
+        pauseButton?.toolTip = paused ? "Continue recording (⌃⌥⌘P)" : "Pause recording (⌃⌥⌘P)"
+        pauseButton?.isEnabled = mode == "recording" || paused
+        stopButton?.isEnabled = ["starting", "recording", "pausing", "paused", "resuming"].contains(mode)
+        if paused {
+            showWindows()
+        } else if ["starting", "resuming", "recording"].contains(mode) {
+            for window in hiddenWindows { window.orderOut(nil) }
+        }
+    }
+    private func updateDurationTitle() {
+        let activeSeconds = clipStartedAt.map { max(0, ProcessInfo.processInfo.systemUptime - $0) } ?? 0
+        let seconds = Int(max(0, recordedSeconds + activeSeconds))
+        let duration = seconds >= 3600
+            ? String(format: "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
+            : String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        let title = " " + duration + " Stop"
+        if stopButton?.title != title { stopButton?.title = title }
+        stopButton?.setAccessibilityLabel("Stop Saturn recording, total recorded time " + duration)
+    }
+    @objc private func toggleRecording() {
+        guard pauseButton?.isEnabled == true else { return }
+        if !isPaused { pauseButton?.isEnabled = false }
+        toggleAction?()
+    }
+    @objc private func stopRecording() {
+        guard stopButton?.isEnabled == true else { return }
+        stopAction?(); update(mode: "stopping")
+    }
+    private func showWindows() {
         for window in hiddenWindows { window.makeKeyAndOrderFront(nil) }
+        if !hiddenWindows.isEmpty { NSApp.activate(ignoringOtherApps: true) }
+    }
+    func end() {
+        durationTimer?.invalidate()
+        durationTimer = nil
+        clipStartedAt = nil
+        recordedSeconds = 0
+        if let pauseItem { NSStatusBar.system.removeStatusItem(pauseItem) }
+        if let stopItem { NSStatusBar.system.removeStatusItem(stopItem) }
+        pauseItem = nil; stopItem = nil; stopAction = nil; toggleAction = nil
+        showWindows()
         hiddenWindows = []
-        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
@@ -114,10 +186,30 @@ func json(_ path: String) throws -> [String: Any] {
 func thumbnail(_ url: URL, destination: URL) async throws {
     let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
     generator.appliesPreferredTrackTransform = true
-    generator.maximumSize = CGSize(width: 960, height: 600)
+    generator.maximumSize = CGSize(width: posterThumbnailMaxDimension, height: posterThumbnailMaxDimension)
     let image = try await generator.image(at: .zero).image
     let bitmap = NSBitmapImageRep(cgImage: image)
-    if let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) { try data.write(to: destination) }
+    guard let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: posterThumbnailJPEGQuality, .progressive: true]) else { throw failure("Could not encode preview thumbnail") }
+    try data.write(to: destination, options: .atomic)
+}
+
+/// Reuse progressive JPEGs at the poster bounds; refresh older sizes once.
+func ensureThumbnail(_ source: URL, destination: URL) async throws {
+    let asset = AVURLAsset(url: source)
+    if let track = try await asset.loadTracks(withMediaType: .video).first,
+       let image = CGImageSourceCreateWithURL(destination as CFURL, nil),
+       CGImageSourceGetType(image) as String? == "public.jpeg",
+       let properties = CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [CFString: Any],
+       let jfif = properties[kCGImagePropertyJFIFDictionary] as? [CFString: Any],
+       jfif[kCGImagePropertyJFIFIsProgressive] as? Bool == true {
+        let size = try await track.load(.naturalSize)
+        let transform = try await track.load(.preferredTransform)
+        let bounds = CGRect(origin: .zero, size: size).applying(transform)
+        let scale = min(1, posterThumbnailMaxDimension / max(abs(bounds.width), abs(bounds.height)))
+        if properties[kCGImagePropertyPixelWidth] as? Int == Int((abs(bounds.width) * scale).rounded()),
+           properties[kCGImagePropertyPixelHeight] as? Int == Int((abs(bounds.height) * scale).rounded()) { return }
+    }
+    try await thumbnail(source, destination: destination)
 }
 
 /// The stream supplies system and microphone samples independently. Store each
@@ -159,11 +251,109 @@ final class SeparateAudioWriter {
     }
 }
 
+/// ScreenCaptureKit delivers sparse frames when the screen is idle. Write a
+/// continuous video-only timeline instead of relying on SCRecordingOutput's
+/// audio-driven movie duration and terminal frame/edit behavior. All methods
+/// except finish run on the stream's serial sample queue.
+final class CaptureVideoWriter {
+    let writer: AVAssetWriter
+    let input: AVAssetWriterInput
+    let adaptor: AVAssetWriterInputPixelBufferAdaptor
+    private(set) var origin: CMTime?
+    private var latest: CVPixelBuffer?
+    private var nextFrame: Int64 = 0
+    private var stopped = false
+    private var endFrame: Int64?
+
+    init(url: URL, width: Int, height: Int) throws {
+        writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width, AVVideoHeightKey: height,
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+            ],
+            AVVideoCompressionPropertiesKey: [
+                AVVideoExpectedSourceFrameRateKey: 30,
+                AVVideoMaxKeyFrameIntervalKey: 30,
+                AVVideoAllowFrameReorderingKey: false
+            ]
+        ])
+        input.expectsMediaDataInRealTime = true
+        adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: nil)
+        guard writer.canAdd(input) else { throw failure("Could not prepare video recording") }
+        writer.add(input)
+    }
+
+    func receive(_ pixels: CVPixelBuffer, at timestamp: CMTime) throws {
+        guard !stopped, timestamp.isNumeric else { return }
+        if origin == nil {
+            guard writer.startWriting() else { throw writer.error ?? failure("Could not start video recording") }
+            writer.startSession(atSourceTime: .zero)
+            origin = timestamp
+        } else {
+            // Fill the idle interval with the previous picture before replacing it.
+            try advance(to: timestamp)
+        }
+        latest = pixels
+        try advance(to: timestamp)
+    }
+
+    func advance(to timestamp: CMTime) throws {
+        guard !stopped, let origin, let latest, timestamp.isNumeric, timestamp >= origin else { return }
+        let frame = CMTimeConvertScale(timestamp - origin, timescale: 30, method: .roundTowardZero).value
+        while nextFrame <= frame {
+            guard input.isReadyForMoreMediaData else {
+                if writer.status == .failed { throw writer.error ?? failure("Could not write video recording") }
+                guard frame - nextFrame < 30 else { throw failure("Video recording could not keep up") }
+                return // Brief encoder backpressure is retried on the next tick.
+            }
+            try append(latest)
+        }
+    }
+
+    private func append(_ pixels: CVPixelBuffer) throws {
+        guard adaptor.append(pixels, withPresentationTime: CMTime(value: nextFrame, timescale: 30)) else {
+            throw writer.error ?? failure("Could not write video recording")
+        }
+        nextFrame += 1
+    }
+
+    func stop(at timestamp: CMTime) throws {
+        guard !stopped else { return }
+        stopped = true
+        if let origin {
+            let frame = CMTimeConvertScale(CMTimeMaximum(.zero, timestamp - origin), timescale: 30, method: .roundTowardZero).value
+            endFrame = max(nextFrame, frame + 1)
+        }
+    }
+
+    func finish() async throws {
+        guard stopped, let endFrame, let latest else { throw failure("The recording has no video frames; captured files were retained.") }
+        // Screen callbacks are stopped. Drain any encoder backpressure before
+        // ending the session, giving the final picture a complete frame.
+        let deadline = Date().addingTimeInterval(30)
+        while nextFrame < endFrame {
+            if writer.status == .failed { throw writer.error ?? failure("Could not finish video recording") }
+            guard Date() < deadline else { throw failure("Video recording finalization timed out") }
+            if input.isReadyForMoreMediaData { try append(latest) }
+            else { try await Task.sleep(nanoseconds: 1_000_000) }
+        }
+        writer.endSession(atSourceTime: CMTime(value: nextFrame, timescale: 30))
+        input.markAsFinished()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            writer.finishWriting { continuation.resume() }
+        }
+        guard writer.status == .completed else { throw writer.error ?? failure("Could not finish video recording") }
+    }
+}
+
 @available(macOS 15.0, *)
-final class Capture: NSObject, SCRecordingOutputDelegate, SCStreamOutput, SCStreamDelegate {
+final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     let lock = NSLock()
     var started = false
-    var finished = false
     var error: Error?
     var clock = CursorClock()
     var latestCursorObservation: CursorObservation?
@@ -178,22 +368,16 @@ final class Capture: NSObject, SCRecordingOutputDelegate, SCStreamOutput, SCStre
     var microphoneAudio: SeparateAudioWriter?
     let report = NativeOutput.reporter ?? printNative
     init(cursor: FileHandle) { self.cursor = cursor }
-    func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {
-        lock.lock(); started = true; lock.unlock()
-        report(["type":"started"])
-    }
-    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
-        lock.lock(); finished = true; lock.unlock()
-    }
-    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
-        lock.lock(); self.error = error; finished = true; lock.unlock()
+    var video: CaptureVideoWriter?
+    func videoTick(at timestamp: CMTime) {
+        do { try video?.advance(to: timestamp) } catch { fail(error) }
     }
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         lock.lock(); self.error = error; lock.unlock()
     }
     func fail(_ error: Error) { lock.lock(); self.error = error; lock.unlock() }
     func hasStarted() -> Bool { lock.lock(); defer { lock.unlock() }; return started }
-    func status() -> (Bool, Error?) { lock.lock(); defer { lock.unlock() }; return (finished, error) }
+    func captureError() -> Error? { lock.lock(); defer { lock.unlock() }; return error }
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard sampleBuffer.isValid else { return }
         if type == .audio || type == .microphone {
@@ -206,7 +390,15 @@ final class Capture: NSObject, SCRecordingOutputDelegate, SCStreamOutput, SCStre
               let rawStatus = attachments.first?[.status] as? Int, SCFrameStatus(rawValue: rawStatus) == .complete else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard pts.isNumeric else { return }
-        anchorCursor(videoPTSUs: CMTimeConvertScale(pts, timescale: 1_000_000, method: .roundTowardZero).value)
+        guard let pixels = sampleBuffer.imageBuffer else { return }
+        do {
+            try video?.receive(pixels, at: pts)
+            anchorCursor(videoPTSUs: CMTimeConvertScale(pts, timescale: 1_000_000, method: .roundTowardZero).value)
+            if !hasStarted(), video?.origin != nil {
+                lock.lock(); started = true; lock.unlock()
+                report(["type":"started"])
+            }
+        } catch { fail(error) }
     }
     func anchorCursor(videoPTSUs origin: Int64) {
         let firstFrame = clock.originUs == nil
@@ -258,7 +450,7 @@ final class Capture: NSObject, SCRecordingOutputDelegate, SCStreamOutput, SCStre
 
 @available(macOS 15.0, *)
 func configureCaptureColors(_ config: SCStreamConfiguration) {
-    // SCRecordingOutput writes Rec.709 video tags. Convert the display pixels
+    // The video writer uses Rec.709 tags. Convert the display pixels
     // into the matching Core Media space before encoding, rather than leaving
     // them in the display profile (often P3). sRGB and itur_709 have different
     // transfer curves and also shift colors when interpreted with these tags.
@@ -266,7 +458,7 @@ func configureCaptureColors(_ config: SCStreamConfiguration) {
 }
 
 @available(macOS 15.0, *)
-func record(_ request: [String: Any]) async throws {
+func recordClip(_ request: [String: Any]) async throws {
     guard let work = request["workspace"] as? String, let source = request["source"] as? [String: Any], let id = source["id"] as? String else { throw failure("Missing capture source") }
     guard let kind = source["kind"] as? String, let sourceID = UInt32(id), sourceID > 0 else {
         throw failure("Choose a window or screen before recording.")
@@ -290,7 +482,7 @@ func record(_ request: [String: Any]) async throws {
         throw failure("The selected screen is no longer available. Choose it again.")
     }
     let frame = selected?.frame ?? display.frame
-    // Recordly's approach: a display filter cropped to the selected window.
+    // Use a display filter cropped to the selected window.
     // No SCContentSharingPicker or single-window filter, so macOS does not
     // replace the target's traffic-light buttons with window-sharing controls.
     let excluded = content.applications.filter { $0.processID == recorderProcessID() || $0.bundleIdentifier == "com.saturn.recorder" }
@@ -322,6 +514,8 @@ func record(_ request: [String: Any]) async throws {
     let handle = try FileHandle(forWritingTo: cursorURL)
     defer { try? handle.close() }
     let capture = Capture(cursor: handle)
+    let mediaURL = URL(fileURLWithPath: work).appendingPathComponent("media/source.mov")
+    capture.video = try CaptureVideoWriter(url: mediaURL, width: config.width, height: config.height)
     capture.frame = area.globalFrame; capture.dimensions = CGSize(width: config.width, height: config.height)
     let stream = SCStream(filter: filter, configuration: config, delegate: capture)
     let sampleQueue = DispatchQueue(label: "saturn.cursor")
@@ -338,6 +532,7 @@ func record(_ request: [String: Any]) async throws {
     cursorTimer.schedule(deadline: .now(), repeating: .nanoseconds(33_333_333), leeway: .milliseconds(1))
     let observations = DispatchGroup()
     cursorTimer.setEventHandler {
+        capture.videoTick(at: CMClockGetTime(CMClockGetHostTimeClock()))
         guard !capture.cursorObservationPending else { return }
         capture.cursorObservationPending = true
         observations.enter()
@@ -356,16 +551,6 @@ func record(_ request: [String: Any]) async throws {
         sampleQueue.sync { }
         observations.wait()
     }
-    let outputConfig = SCRecordingOutputConfiguration()
-    let mediaURL = URL(fileURLWithPath: work).appendingPathComponent("media/source.mov")
-    outputConfig.outputURL = mediaURL; outputConfig.outputFileType = .mov; outputConfig.videoCodecType = .h264
-    let output = SCRecordingOutput(configuration: outputConfig, delegate: capture)
-    try stream.addRecordingOutput(output)
-    await RecordingBar.shared.begin {
-        do { try Data().write(to: URL(fileURLWithPath: work + "/stop")) }
-        catch { capture.fail(error) }
-    }
-    defer { Task { @MainActor in RecordingBar.shared.end() } }
     if let selected { await activateSelectedWindow(selected) }
     // Establish a cursor state before video can arrive, even if the timer's
     // first main-actor observation has not completed yet.
@@ -373,12 +558,13 @@ func record(_ request: [String: Any]) async throws {
         sampleQueue.sync { capture.sampleCursor(initialCursor) }
     }
     try await stream.startCapture()
+    let control = request["controlWorkspace"] as? String ?? work
     let start = Date()
     let owner = getppid()
     var lastFrame = area.globalFrame
-    while !FileManager.default.fileExists(atPath: work + "/stop") {
-        if getppid() != owner || Date().timeIntervalSince(start) >= 86_399 { break }
-        if capture.status().1 != nil { break }
+    while !FileManager.default.fileExists(atPath: control + "/stop") && !FileManager.default.fileExists(atPath: control + "/pause") {
+        if getppid() != owner || Date().timeIntervalSince(start) >= (request["maximumDuration"] as? Double ?? 86_399) { break }
+        if capture.captureError() != nil { break }
         if let selected { do {
             guard let entries = CGWindowListCopyWindowInfo(.optionIncludingWindow, selected.windowID) as? [[String: Any]],
                   let info = entries.first, (info[kCGWindowIsOnscreen as String] as? Bool) == true,
@@ -400,17 +586,18 @@ func record(_ request: [String: Any]) async throws {
         }
         try await Task.sleep(nanoseconds: 100_000_000)
     }
-    // Even on a stream failure, give the recording output a chance to finalize.
-    try? await stream.stopCapture()
+    emit(["type":"pausing"])
+    let stopTime = CMClockGetTime(CMClockGetHostTimeClock())
     cursorTimer.cancel()
-    sampleQueue.sync { }
-    observations.wait()
-    for _ in 0..<300 {
-        if capture.status().0 { break }
-        try await Task.sleep(nanoseconds: 100_000_000)
+    // Drain ScreenCaptureKit before closing the writer so an in-flight final
+    // screen update is still recorded, even if it arrives after Stop was pressed.
+    try? await stream.stopCapture()
+    sampleQueue.sync {
+        do { try capture.video?.stop(at: stopTime) } catch { capture.fail(error) }
     }
-    let status = capture.status()
-    guard status.0 else { throw failure("Recording finalization timed out. Source media retained for recovery.") }
+    observations.wait()
+    try await capture.video?.finish()
+    let captureError = capture.captureError()
     try handle.synchronize()
     try JSONEncoder().encode(capture.cursorAssets).write(to: URL(fileURLWithPath: work + "/cursor/assets.json"), options: .atomic)
     try await capture.systemAudio?.finish()
@@ -426,8 +613,100 @@ func record(_ request: [String: Any]) async throws {
     }
     result["separateAudio"] = ["system":audioInfo(capture.systemAudio, path:"media/system.m4a"),
                                "microphone":audioInfo(capture.microphoneAudio, path:"media/microphone.m4a")]
-    if let error = status.1 { result["warning"] = "Capture stopped unexpectedly: " + error.localizedDescription + " The recording was saved." }
+    if let error = captureError { result["warning"] = "Capture stopped unexpectedly: " + error.localizedDescription + " The recording was saved." }
     emit(result)
+}
+
+/// A completed clip is checkpointed before acknowledging Pause. The next clip
+/// owns a fresh media clock, audio writers and cursor sampler.
+@available(macOS 15.0, *)
+func record(_ request: [String: Any], captureClip: ([String: Any]) async throws -> Void = recordClip) async throws {
+    guard let work = request["workspace"] as? String else { throw failure("Missing workspace") }
+    let root = URL(fileURLWithPath: work)
+    let fm = FileManager.default
+    let report = NativeOutput.reporter ?? printNative
+    var clips: [[String: Any]] = []
+    var totalUs: Int64 = 0
+    func signal(_ name: String) { do { try Data().write(to: root.appendingPathComponent(name), options: .atomic) } catch { report(["type":"controlError", "message":error.localizedDescription]) } }
+    await RecordingBar.shared.begin(stop: { signal("stop") }, toggle: {
+        // The controller removes pause only after Continue has been requested.
+        if fm.fileExists(atPath: work + "/pause") {
+            // Share the panel's countdown preference and cancellation behavior.
+            report(["type":"continueRequested"])
+        } else { signal("pause") }
+    })
+    defer { Task { @MainActor in RecordingBar.shared.end() } }
+    var warning: String?
+    for index in 1...1000 {
+        if fm.fileExists(atPath: work + "/stop") { break }
+        let id = String(format: "%04d", index)
+        let prefix = "clips/" + id + "/"
+        let folder = root.appendingPathComponent("clips/" + id)
+        for part in ["media", "cursor", "preview"] { try fm.createDirectory(at: folder.appendingPathComponent(part), withIntermediateDirectories: true) }
+        var next = request; next["workspace"] = folder.path; next["controlWorkspace"] = work; next["maximumDuration"] = max(0.1, 86_399 - Double(totalUs) / 1_000_000)
+        let accumulated = totalUs
+        // Delegate callbacks may arrive on another queue; collect through a lock.
+        let result = ClipResult()
+        do {
+            try await NativeOutput.$reporter.withValue({ event in
+                if event["type"] as? String == "finished" { result.set(event); return }
+                var event = event
+                event["recordedDurationMs"] = accumulated / 1000
+                report(event)
+                if let mode = event["type"] as? String, ["started", "pausing"].contains(mode) {
+                    Task { @MainActor in RecordingBar.shared.update(mode: mode == "started" ? "recording" : "pausing", recordedDurationUs: mode == "started" ? accumulated : nil) }
+                }
+            }) { try await captureClip(next) }
+        } catch {
+            if clips.isEmpty { throw error }
+            warning = "The next clip could not be recorded: " + error.localizedDescription + " Earlier clips were kept."
+            break
+        }
+        guard let finished = result.get(), let duration = finished["durationUs"] as? Int64, duration > 0 else {
+            if clips.isEmpty { throw failure("No video was captured") }
+            warning = "The last clip contained no video. Earlier clips were kept."; break
+        }
+        var audio = finished["separateAudio"] as? [String: Any] ?? [:]
+        for key in ["system", "microphone"] {
+            if var track = audio[key] as? [String: Any], let path = track["path"] as? String { track["path"] = prefix + path; audio[key] = track }
+        }
+        let media: [String: Any] = ["path":prefix + "media/source.mov", "captureKind":(request["source"] as? [String: Any])?["kind"] ?? "window",
+            "durationUs":duration, "width":finished["width"]!, "height":finished["height"]!,
+            "frameRate":["numerator":30, "denominator":1], "hasSystemAudio":request["systemAudio"] as? Bool ?? false,
+            "hasMicrophoneAudio":request["microphone"] as? Bool ?? false, "separateAudio":audio]
+        clips.append(["id":id, "media":media, "cursor":["path":prefix + "cursor/events.jsonl", "timeUnit":"microseconds", "coordinateSpace":"capturedVideoPixels"]])
+        totalUs += duration
+        try JSONSerialization.data(withJSONObject: ["clips":clips]).write(to: root.appendingPathComponent("clips.json"), options: .atomic)
+        if clips.count == 1 { try? fm.copyItem(at: folder.appendingPathComponent("preview/thumbnail.jpg"), to: root.appendingPathComponent("preview/thumbnail.jpg")) }
+        report(["type":"clipFinished", "clips":clips, "recordedDurationMs":totalUs / 1000])
+        if let problem = finished["warning"] as? String { warning = problem; break }
+        if fm.fileExists(atPath: work + "/stop") { break }
+        if totalUs >= 86_399_000_000 { warning = "The recording reached the 24-hour limit."; break }
+        if index == 1000 { warning = "The recording reached the 1,000 clip limit."; break }
+        report(["type":"paused", "recordedDurationMs":totalUs / 1000])
+        await RecordingBar.shared.update(mode: "paused", recordedDurationUs: totalUs)
+        let owner = getppid()
+        while !fm.fileExists(atPath: work + "/continue") && !fm.fileExists(atPath: work + "/stop") {
+            if getppid() != owner { signal("stop"); break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if fm.fileExists(atPath: work + "/stop") { break }
+        try? fm.removeItem(atPath: work + "/continue")
+        try? fm.removeItem(atPath: work + "/pause")
+        report(["type":"resuming", "recordedDurationMs":totalUs / 1000])
+        await RecordingBar.shared.update(mode: "resuming")
+    }
+    guard !clips.isEmpty else { throw failure("No video was captured") }
+    var final: [String: Any] = ["type":"finished", "clips":clips, "durationUs":totalUs]
+    if let warning { final["warning"] = warning }
+    report(final)
+}
+
+final class ClipResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: [String: Any]?
+    func set(_ value: [String: Any]) { lock.lock(); self.value = value; lock.unlock() }
+    func get() -> [String: Any]? { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 func runNative(command: String, arguments: [String]) async throws {
@@ -490,6 +769,10 @@ func runNative(command: String, arguments: [String]) async throws {
             case "record":
                 if #available(macOS 15.0, *) { try await record(json(arguments[0])) } else { throw failure("macOS 15 or later is required") }
             case "export": try await exportVideo(json(arguments[0]))
+            case "ensure-thumbnail":
+                guard arguments.count == 2 else { throw failure("Missing thumbnail paths") }
+                try await ensureThumbnail(URL(fileURLWithPath: arguments[0]), destination: URL(fileURLWithPath: arguments[1]))
+                emit(["ok":true])
             case "inspect":
                 let url = URL(fileURLWithPath: arguments[0]); let asset = AVURLAsset(url: url)
                 guard let video = try await asset.loadTracks(withMediaType: .video).first else { throw failure("No recoverable video track") }

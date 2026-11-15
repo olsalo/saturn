@@ -4,13 +4,19 @@ import { initialSnapshot, recorderReducer } from "./recorder-machine";
 export function useAppEvents() {
   const [state, dispatch] = useReducer(recorderReducer, initialSnapshot);
   const [working, setWorking] = useState(false);
+  const [initialized, setInitialized] = useState(!native);
   useEffect(() => {
     if (!native) return;
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
+    let revision = 0;
     void api
       .subscribe((snapshot) => {
-        if (!disposed) dispatch({ type: "backend", snapshot });
+        if (!disposed) {
+          revision += 1;
+          dispatch({ type: "backend", snapshot });
+          setInitialized(true);
+        }
       })
       .then(async (stop) => {
         if (disposed) {
@@ -18,11 +24,18 @@ export function useAppEvents() {
           return;
         }
         unsubscribe = stop;
+        const requestedAt = revision;
         const snapshot = await api.snapshot();
-        if (!disposed) dispatch({ type: "backend", snapshot });
+        if (!disposed && revision === requestedAt) {
+          dispatch({ type: "backend", snapshot });
+          setInitialized(true);
+        }
       })
       .catch((error) => {
-        if (!disposed) dispatch({ type: "error", message: String(error) });
+        if (!disposed) {
+          dispatch({ type: "error", message: String(error) });
+          setInitialized(true);
+        }
       });
     return () => {
       disposed = true;
@@ -46,6 +59,7 @@ export function useAppEvents() {
   }, []);
   return {
     state,
+    initialized,
     working,
     run,
     dismiss: () => {

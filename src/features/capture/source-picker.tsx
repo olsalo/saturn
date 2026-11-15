@@ -13,19 +13,32 @@ import {
   AlertDialogDescription,
   AlertDialogFooter,
 } from "@/components/ui/alert-dialog";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type Ref,
+} from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, native } from "@/lib/tauri";
 import type { CaptureSource, ScreenPermissionStatus } from "@/lib/contracts";
 
+export type SourcePickerHandle = {
+  refresh: () => Promise<CaptureSource[] | null>;
+};
+
 export function SourcePicker({
+  ref,
   onSelect,
   value,
   disabled,
   preserveSelection,
 }: {
+  ref?: Ref<SourcePickerHandle>;
   onSelect: (source: CaptureSource | null) => void;
   value: CaptureSource | null;
   disabled: boolean;
@@ -38,7 +51,7 @@ export function SourcePicker({
   const [loading, setLoading] = useState(native);
   const [error, setError] = useState("");
   const [permissionOpen, setPermissionOpen] = useState(false);
-  const inFlight = useRef(false);
+  const inFlight = useRef<Promise<CaptureSource[] | null> | null>(null);
   const loweredWindow = useRef(false);
   const permissionRequestInProgress = useRef(false);
   const mounted = useRef(true);
@@ -48,53 +61,67 @@ export function SourcePicker({
   selectionRef.current = value;
   selectRef.current = onSelect;
   preserveSelectionRef.current = preserveSelection;
-  const refresh = useCallback(async () => {
-    if (!native || inFlight.current) return;
-    inFlight.current = true;
-    setLoading(true);
-    setError("");
-    try {
-      const status = await api.permissions();
-      if (!mounted.current) return;
-      setPermission(status);
-      if (status.screen) setPermissionOpen(false);
-      if (status.screen) {
+  const refresh = useCallback((): Promise<CaptureSource[] | null> => {
+    if (!native) return Promise.resolve(null);
+    if (inFlight.current) return inFlight.current;
+    const task = (async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const status = await api.permissions();
+        if (!mounted.current) return null;
+        setPermission(status);
+        if (status.screen) setPermissionOpen(false);
+        if (!status.screen) return null;
         const result = await api.sources();
-        if (!mounted.current) return;
+        if (!mounted.current) return null;
         if (result.permissionRequired) {
           setPermission({
             screen: false,
             canRequest: false,
             needsRestart: result.needsRestart ?? false,
           });
-        } else {
-          setSources(result.sources);
-          const selected = selectionRef.current;
-          if (selected && !preserveSelectionRef.current) {
-            const current = result.sources.find(
-              (source) =>
-                source.kind === selected.kind &&
-                source.id === selected.id &&
-                (source.kind === "display" ||
-                  source.application === selected.application),
-            );
-            if (!current) selectRef.current(null);
-            else if (
-              current.label !== selected.label ||
-              current.application !== selected.application ||
-              current.primary !== selected.primary
-            )
-              selectRef.current(current);
-          }
+          return null;
         }
+        setSources(result.sources);
+        const selected = selectionRef.current;
+        if (selected && !preserveSelectionRef.current) {
+          const current = result.sources.find((source) =>
+            sameCaptureSource(source, selected),
+          );
+          if (!current) selectRef.current(null);
+          else if (
+            current.label !== selected.label ||
+            current.application !== selected.application ||
+            current.primary !== selected.primary
+          )
+            selectRef.current(current);
+        }
+        return result.sources;
+      } catch (e) {
+        if (mounted.current) setError(String(e));
+        return null;
+      } finally {
+        if (mounted.current) setLoading(false);
       }
-    } catch (e) {
-      if (mounted.current) setError(String(e));
-    } finally {
-      inFlight.current = false;
-      if (mounted.current) setLoading(false);
-    }
+    })();
+    inFlight.current = task;
+    void task.finally(() => {
+      inFlight.current = null;
+    });
+    return task;
   }, []);
+  useImperativeHandle(
+    ref,
+    () => ({
+      refresh: async () => {
+        // A pre-start check must follow any older background enumeration.
+        if (inFlight.current) await inFlight.current;
+        return refresh();
+      },
+    }),
+    [refresh],
+  );
   useEffect(() => {
     mounted.current = true;
     void refresh();
@@ -120,6 +147,31 @@ export function SourcePicker({
       unlisten?.();
     };
   }, [refresh]);
+  useEffect(() => {
+    if (
+      !native ||
+      !permission?.screen ||
+      permissionOpen ||
+      disabled ||
+      preserveSelection ||
+      value?.kind !== "window"
+    )
+      return;
+    // Detect a closed target even while another app has focus. Keep the current
+    // selection visible until a completed enumeration confirms it is gone.
+    const timer = setInterval(() => {
+      void refresh();
+    }, 750);
+    return () => clearInterval(timer);
+  }, [
+    permission?.screen,
+    permissionOpen,
+    disabled,
+    preserveSelection,
+    value?.kind,
+    value?.id,
+    refresh,
+  ]);
   return (
     <div>
       {permission?.screen ? (
@@ -283,5 +335,16 @@ export function SourcePicker({
         </p>
       )}
     </div>
+  );
+}
+
+export function sameCaptureSource(
+  source: CaptureSource,
+  selected: CaptureSource,
+) {
+  return (
+    source.kind === selected.kind &&
+    source.id === selected.id &&
+    (source.kind === "display" || source.application === selected.application)
   );
 }

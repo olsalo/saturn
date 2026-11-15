@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { exportLayout, previewCanvasSize } from "./export-layout";
-test("16:10 preview matches Recordly's linked 38% padding", () => {
+test("16:10 preview uses linked 38% padding", () => {
   const rect = exportLayout(640, 400);
   expect(rect.width).toBeCloseTo(0.848);
   expect(rect.height).toBeCloseTo(0.848);

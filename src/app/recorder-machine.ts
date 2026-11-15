@@ -27,6 +27,9 @@ export function isBusy(mode: Snapshot["mode"]) {
   return [
     "starting",
     "recording",
+    "pausing",
+    "paused",
+    "resuming",
     "stopping",
     "finalizing",
     "exporting",

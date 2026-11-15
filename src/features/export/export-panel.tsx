@@ -17,6 +17,7 @@ import {
   SelectPopup,
   SelectItem,
 } from "@/components/ui/select";
+import { usePreferences } from "@/lib/preferences";
 import { api } from "@/lib/tauri";
 import { time, fileName } from "@/lib/format";
 import type { Snapshot } from "@/lib/contracts";
@@ -34,7 +35,12 @@ export function ExportPanel({
   run: (f: () => Promise<unknown>) => Promise<boolean>;
 }) {
   const p = state.project!;
-  const [websiteExport, setWebsiteExport] = useState(true);
+  const [exportOptions, setExportOptions] = usePreferences<{ website: boolean }>(
+    "saturn.export-options",
+    { website: true },
+  );
+  const websiteExport = exportOptions.website;
+  const setWebsiteExport = (website: boolean) => setExportOptions({ website });
   const exportFormat = websiteExport ? "web" : "h264";
   const [pendingAspect, setPendingAspect] = useState<string | null>(null);
   const [pendingResolution, setPendingResolution] = useState<string | null>(

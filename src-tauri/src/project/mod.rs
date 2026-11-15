@@ -1,6 +1,9 @@
 pub mod archive;
+pub mod background;
 pub mod disk;
 pub mod manifest;
+#[cfg(any(target_os = "macos", test))]
+pub mod open_requests;
 use manifest::Manifest;
 use std::path::PathBuf;
 #[derive(Clone)]

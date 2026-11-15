@@ -6,14 +6,14 @@ import Foundation
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let cancel = folder.appendingPathComponent("cancel")
-        let encoder: ExportEncoder = .ffmpeg
+        let encoder: ExportEncoder = .h264
         do {
             try await encodeVideo(input: URL(fileURLWithPath: CommandLine.arguments[1]),
                 output: folder.appendingPathComponent("cancelled.mp4"), cancel: cancel, encoder: encoder) { _ in
                     // Callback occurs only after the encoder process was launched.
                     try? Data().write(to: cancel)
                 }
-            fatalError("A cancelled HEVC encode reported success")
+            fatalError("A cancelled H.264 encode reported success")
         } catch {
             assert(error.localizedDescription == "Export cancelled", error.localizedDescription)
             print("\(encoder.rawValue) active cancellation passed: a launched encoder returns cancellation, never completion.")
