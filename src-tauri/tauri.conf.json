@@ -25,7 +25,7 @@
         "alwaysOnTop": true,
         "center": true,
         "visible": false,
-        "contentProtected": true
+        "contentProtected": false
       }
     ],
     "security": {

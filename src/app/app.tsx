@@ -108,9 +108,6 @@ export default function App() {
           }}
         >
           <span className="brand-mark" aria-hidden="true" />
-          <span>
-            saturn
-          </span>
         </div>
         <Popover open={help} onOpenChange={setHelp}>
           <PopoverTrigger

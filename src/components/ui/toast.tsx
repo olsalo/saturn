@@ -65,13 +65,20 @@ function Toasts({
   portalProps,
   isMobile,
   openOverlayCount,
+  retainPosition,
 }: {
   position: ToastPosition;
   isMobile: boolean;
-  openOverlayCount: number;
+  openOverlayCount: number
+  retainPosition: boolean
   portalProps?: ComponentProps<typeof Toast.Portal>;
 }): ReactElement {
-  const { toasts, close } = Toast.useToastManager();
+  const { toasts, close } = Toast.useToastManager()
+  const [stablePosition, setStablePosition] = useState(position)
+  // Keep the visible stack where it appeared after its sheet closes, including exit animations
+  if (stablePosition !== position && (!retainPosition || toasts.length === 0)) {
+    setStablePosition(position)
+  }
   const previousOpenOverlayCount = useRef(0)
   const [immediatelyDismissedIds, setImmediatelyDismissedIds] = useState<Set<string>>(() => new Set())
   useLayoutEffect(() => {
@@ -81,7 +88,7 @@ function Toasts({
     }
     previousOpenOverlayCount.current = openOverlayCount
   }, [close, isMobile, openOverlayCount, toasts])
-  const swipeDirection = getSwipeDirection(position);
+  const swipeDirection = getSwipeDirection(stablePosition)
 
   return (
     <Toast.Portal data-slot="toast-portal" {...portalProps}>
@@ -96,7 +103,7 @@ function Toasts({
           "data-[position*=right]:right-(--toast-inset)",
           "data-[position*=center]:left-1/2 data-[position*=center]:-translate-x-1/2",
         )}
-        data-position={position}
+        data-position={stablePosition}
         data-slot="toast-viewport"
       >
         {toasts.map((toast) => {
@@ -153,7 +160,7 @@ function Toasts({
                 immediatelyDismissedIds.has(toast.id) && "data-ending-style:transition-none",
               )}
               {...toastData?.rootProps}
-              data-position={position}
+              data-position={stablePosition}
               swipeDirection={swipeDirection}
               toast={toast}
             >
@@ -320,7 +327,7 @@ export function ToastProvider({
   return (
     <Toast.Provider timeout={timeout} toastManager={toastManager} {...props}>
       {children}
-      <Toasts isMobile={isMobile} openOverlayCount={openOverlayCount} portalProps={portalProps} position={toastPosition} />
+      <Toasts isMobile={isMobile} openOverlayCount={openOverlayCount} portalProps={portalProps} position={toastPosition} retainPosition={!isMobile && !isSheetOpen && position === undefined} />
     </Toast.Provider>
   );
 }

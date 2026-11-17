@@ -112,7 +112,7 @@ export function ExportPanel({
           <h1>
             {done
               ? state.outputIsWebsite
-                ? "Website videos saved"
+                ? "Web videos saved"
                 : "Video saved"
               : "Export recording"}
           </h1>
